@@ -1,0 +1,11 @@
+nohup: ignoring input
+INFO:__main__:Starting bot...
+INFO:aiogram.dispatcher:Start polling
+INFO:aiogram.dispatcher:Run polling for bot @MLI20AssistantBot id=8523997838 - 'MLI_2.0'
+INFO:aiogram.event:Update id=835061393 is handled. Duration 194 ms by bot id=8523997838
+INFO:aiogram.event:Update id=835061394 is handled. Duration 33 ms by bot id=8523997838
+INFO:__main__:Генерация графика...
+INFO:aiogram.event:Update id=835061395 is handled. Duration 308 ms by bot id=8523997838
+INFO:aiogram.event:Update id=835061396 is handled. Duration 45 ms by bot id=8523997838
+INFO:__main__:Bot started by user 1200382005
+INFO:aiogram.event:Update id=835061397 is handled. Duration 594 ms by bot id=8523997838

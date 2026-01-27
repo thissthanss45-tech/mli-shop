@@ -1,0 +1,6 @@
+INFO:__main__:Starting bot...
+INFO:aiogram.dispatcher:Start polling
+INFO:aiogram.dispatcher:Run polling for bot @MLI20AssistantBot id=8523997838 - 'MLI_2.0'
+WARNING:aiogram.dispatcher:Received SIGINT signal
+INFO:aiogram.dispatcher:Polling stopped for bot @MLI20AssistantBot id=8523997838 - 'MLI_2.0'
+INFO:aiogram.dispatcher:Polling stopped
