@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: shop_user
+      POSTGRES_PASSWORD: shop_password
+      POSTGRES_DB: shop_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    restart: always
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    restart: always
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+
+  bot:
+    build: .
+    restart: always
+    depends_on:
+      - db
+      - redis
+      - rabbitmq
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    environment:
+      DB_URL: postgresql+asyncpg://shop_user:shop_password@db/shop_db
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+    command: sh -c "alembic -c /app/alembic.ini upgrade head && python shop.py"
+
+  worker:
+    build: .
+    restart: always
+    depends_on:
+      - db
+      - redis
+      - rabbitmq
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    environment:
+      DB_URL: postgresql+asyncpg://shop_user:shop_password@db/shop_db
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+    command: python worker.py
+
+volumes:
+  postgres_data:
