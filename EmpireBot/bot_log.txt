@@ -1,3 +1,0 @@
-nohup: ignoring input
-/root/EmpireBot/src/bot.py:313: FutureWarning: Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`
-  добавить_товар(data['current_wh_id'], str(r[0]), int(r[1]), float(r[2]))
