@@ -30,6 +30,7 @@ from .owner_states import (
     DeleteCategoryStates,
     DeleteBrandStates,
     SupportReplyStates,
+    OrderHistoryStates,
 )
 from .owner_keyboards import (
     cancel_kb,
@@ -492,19 +493,165 @@ async def owner_delete_brand_execute(callback: CallbackQuery, state: FSMContext,
 
 # ---------- УПРАВЛЕНИЕ ЗАКАЗАМИ ----------
 
+HISTORY_PAGE_SIZE = 20
+
+def _orders_menu_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📋 Активные заказы")],
+            [KeyboardButton(text="✅ История заказов")],
+            [KeyboardButton(text="❌ Отмена")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+async def _require_owner_or_staff(message: Message, session: AsyncSession) -> bool:
+    if await _is_owner_or_staff(message.from_user.id, session):
+        return True
+    await message.answer("⛔ Только для персонала.")
+    return False
+
+
+async def _require_owner_or_staff_cb(callback: CallbackQuery, session: AsyncSession) -> bool:
+    if await _is_owner_or_staff(callback.from_user.id, session):
+        return True
+    await callback.answer("⛔ Только для персонала.", show_alert=True)
+    return False
+
+
+def _build_history_kb(page: int, total_pages: int, has_filter: bool) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    nav_count = 0
+    if total_pages > 1 and page > 1:
+        kb.button(text="⬅️ Назад", callback_data=f"orders:history:page:{page-1}")
+        nav_count += 1
+    if total_pages > 1 and page < total_pages:
+        kb.button(text="Вперед ➡️", callback_data=f"orders:history:page:{page+1}")
+        nav_count += 1
+
+    kb.button(text="📆 Фильтр по дате", callback_data="orders:history:filter")
+    if has_filter:
+        kb.button(text="♻️ Сбросить фильтр", callback_data="orders:history:reset")
+
+    layout = []
+    if nav_count > 0:
+        layout.append(nav_count)
+    layout.append(1)
+    if has_filter:
+        layout.append(1)
+    kb.adjust(*layout)
+    return kb.as_markup()
+
+
+async def _render_orders_history(
+    message: Message,
+    session: AsyncSession,
+    state: FSMContext,
+    page: int,
+    edit: bool,
+) -> None:
+    data = await state.get_data()
+    date_str = data.get("history_date")
+    start_date = None
+    end_date = None
+
+    if date_str:
+        try:
+            parsed_date = datetime.strptime(date_str, "%d.%m.%Y")
+            start_date = datetime(parsed_date.year, parsed_date.month, parsed_date.day)
+            end_date = start_date + timedelta(days=1) - timedelta(microseconds=1)
+        except ValueError:
+            date_str = None
+            await state.update_data(history_date=None)
+
+    repo = OrdersRepo(session)
+    total_count = await repo.count_orders_by_statuses(
+        [OrderStatus.COMPLETED.value],
+        start_date=start_date,
+        end_date=end_date,
+    )
+    total_pages = max(1, (total_count + HISTORY_PAGE_SIZE - 1) // HISTORY_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+
+    orders = []
+    if total_count > 0:
+        offset = (page - 1) * HISTORY_PAGE_SIZE
+        orders = await repo.get_orders_with_items_by_statuses_paginated(
+            [OrderStatus.COMPLETED.value],
+            limit=HISTORY_PAGE_SIZE,
+            offset=offset,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    filter_label = date_str if date_str else "без фильтра"
+    text_parts = [
+        "✅ <b>История выполненных заказов</b>",
+        f"Фильтр по дате: <b>{filter_label}</b>",
+        f"Страница {page}/{total_pages} | Всего: {total_count}",
+    ]
+
+    if not orders:
+        text_parts.append("\n✅ Выполненных заказов не найдено.")
+    else:
+        for order in orders:
+            lines_list = []
+            if not order.items:
+                lines_list.append("⚠️ <i>Ошибка: Заказ пуст</i>")
+            else:
+                for item in order.items:
+                    brand = item.product.brand.name if (item.product and item.product.brand) else "Без бренда"
+                    title = item.product.title if item.product else "ТОВАР УДАЛЁН"
+                    sku = item.product.sku if (item.product and item.product.sku) else None
+                    price_fmt = f"{item.sale_price:g}"
+                    sku_line = f"   SKU: {sku}\n" if sku else ""
+                    lines_list.append(
+                        f"▫️ <b>{brand} | {title}</b>\n"
+                        f"{sku_line}"
+                        f"   Размер: {item.size} | {item.quantity} шт. | {price_fmt} ₽"
+                    )
+
+            items_text = "\n".join(lines_list)
+            date_fmt = order.created_at.strftime('%d.%m.%Y')
+            total_fmt = f"{order.total_price:g}"
+            text_parts.append(
+                "\n"
+                f"✅ <b>Заказ #{order.id} от {date_fmt}</b>\n"
+                f"👤 {order.full_name}\n"
+                f"📱 <code>{order.phone}</code>\n"
+                f"💰 Сумма: <b>{total_fmt} ₽</b>\n"
+                f"<b>Состав заказа:</b>\n{items_text}"
+            )
+
+    text = "\n".join(text_parts)
+    reply_markup = _build_history_kb(page, total_pages, has_filter=bool(date_str))
+
+    if edit:
+        await message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
+    else:
+        await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
+
+
 @main_router.message(F.text == "📋 Заказы")
 async def owner_orders_menu(message: Message, session: AsyncSession) -> None:
+    if not await _require_owner_or_staff(message, session):
+        return
+    await message.answer("Выберите раздел заказов:", reply_markup=_orders_menu_kb())
+
+
+@main_router.message(F.text == "📋 Активные заказы")
+async def owner_active_orders(message: Message, session: AsyncSession) -> None:
+    if not await _require_owner_or_staff(message, session):
+        return
+
     is_owner = message.from_user.id == settings.owner_id
-    if not is_owner:
-        stmt = select(User).where(User.tg_id == message.from_user.id)
-        user = (await session.execute(stmt)).scalar_one_or_none()
-        if not user or normalize_role(user.role) != UserRole.STAFF.value:
-            await message.answer("⛔ Только для персонала.")
-            return
 
     repo = OrdersRepo(session)
     if is_owner:
-        orders = await repo.get_new_orders_with_items()
+        orders = await repo.get_orders_with_items_by_statuses(
+            [OrderStatus.NEW.value, OrderStatus.PROCESSING.value]
+        )
     else:
         orders = await repo.get_orders_with_items_by_statuses(
             [OrderStatus.NEW.value, OrderStatus.PROCESSING.value]
@@ -547,6 +694,64 @@ async def owner_orders_menu(message: Message, session: AsyncSession) -> None:
         kb.button(text="❌ Отменить", callback_data=f"order:cancel:{order.id}")
         kb.adjust(2)
         await message.answer(card_text, reply_markup=kb.as_markup(), parse_mode="HTML")
+
+
+@main_router.message(F.text == "✅ История заказов")
+async def owner_orders_history(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    if not await _require_owner_or_staff(message, session):
+        return
+    await _render_orders_history(message, session, state, page=1, edit=False)
+
+
+@main_router.callback_query(F.data.startswith("orders:history:"))
+async def owner_orders_history_cb(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    if not await _require_owner_or_staff_cb(callback, session):
+        return
+
+    parts = callback.data.split(":")
+    action = parts[2] if len(parts) > 2 else ""
+
+    if action == "page" and len(parts) == 4 and parts[3].isdigit():
+        page = int(parts[3])
+        await _render_orders_history(callback.message, session, state, page=page, edit=True)
+        await callback.answer()
+        return
+
+    if action == "filter":
+        await state.set_state(OrderHistoryStates.waiting_for_date)
+        await callback.message.answer("Введите дату в формате ДД.ММ.ГГГГ")
+        await callback.answer()
+        return
+
+    if action == "reset":
+        await state.update_data(history_date=None)
+        await _render_orders_history(callback.message, session, state, page=1, edit=True)
+        await callback.answer()
+        return
+
+    await callback.answer()
+
+
+@main_router.message(OrderHistoryStates.waiting_for_date)
+async def owner_orders_history_set_date(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    if not await _require_owner_or_staff(message, session):
+        return
+
+    text = (message.text or "").strip()
+    if text in {"❌ Отмена", "🔙 Назад"}:
+        await state.set_state(None)
+        await _render_orders_history(message, session, state, page=1, edit=False)
+        return
+
+    try:
+        datetime.strptime(text, "%d.%m.%Y")
+    except ValueError:
+        await message.answer("Неверный формат. Введите дату как ДД.ММ.ГГГГ, например 13.02.2026.")
+        return
+
+    await state.update_data(history_date=text)
+    await state.set_state(None)
+    await _render_orders_history(message, session, state, page=1, edit=False)
 
 @main_router.callback_query(F.data.startswith("order:done:"))
 async def owner_order_done(callback: CallbackQuery, session: AsyncSession) -> None:

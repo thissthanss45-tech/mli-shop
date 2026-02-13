@@ -64,3 +64,8 @@ class EditProductStates(StatesGroup):
 class SupportReplyStates(StatesGroup):
     """Состояния для ответов клиентам."""
     waiting_for_reply = State()
+
+
+class OrderHistoryStates(StatesGroup):
+    """Состояния для истории заказов владельца."""
+    waiting_for_date = State()

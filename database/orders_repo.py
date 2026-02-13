@@ -191,6 +191,55 @@ class OrdersRepo:
         res = await self.session.execute(stmt)
         return res.scalars().all()
 
+    async def get_orders_with_items_by_statuses_paginated(
+        self,
+        statuses: Sequence[str],
+        limit: int,
+        offset: int,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+    ) -> Sequence[Order]:
+        """Получение заказов по статусам с пагинацией и фильтром по дате."""
+        conditions = [Order.status.in_(list(statuses))]
+        if start_date and end_date:
+            conditions.append(Order.created_at.between(start_date, end_date))
+        elif start_date:
+            conditions.append(Order.created_at >= start_date)
+        elif end_date:
+            conditions.append(Order.created_at <= end_date)
+
+        stmt = (
+            select(Order)
+            .options(
+                selectinload(Order.items).selectinload(OrderItem.product).selectinload(Product.brand)
+            )
+            .where(*conditions)
+            .order_by(Order.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        res = await self.session.execute(stmt)
+        return res.scalars().all()
+
+    async def count_orders_by_statuses(
+        self,
+        statuses: Sequence[str],
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+    ) -> int:
+        """Количество заказов по статусам с фильтром по дате."""
+        conditions = [Order.status.in_(list(statuses))]
+        if start_date and end_date:
+            conditions.append(Order.created_at.between(start_date, end_date))
+        elif start_date:
+            conditions.append(Order.created_at >= start_date)
+        elif end_date:
+            conditions.append(Order.created_at <= end_date)
+
+        stmt = select(func.count(Order.id)).where(*conditions)
+        res = await self.session.execute(stmt)
+        return int(res.scalar_one() or 0)
+
     async def update_order_status(self, order_id: int, new_status: str) -> bool:
         """Обновление статуса заказа."""
         stmt = (
