@@ -254,6 +254,23 @@ class OrdersRepo:
         res = await self.session.execute(stmt)
         return res.scalars().all()
 
+    async def get_user_active_orders(self, user_id: int) -> Sequence[Order]:
+        """Получение активных (не завершенных) заказов пользователя."""
+        active_statuses = [OrderStatus.NEW.value, OrderStatus.PROCESSING.value]
+        stmt = (
+            select(Order)
+            .options(
+                selectinload(Order.items).selectinload(OrderItem.product).selectinload(Product.brand)
+            )
+            .where(
+                Order.user_id == user_id,
+                Order.status.in_(active_statuses)
+            )
+            .order_by(Order.created_at.desc())
+        )
+        res = await self.session.execute(stmt)
+        return res.scalars().all()
+
     # ===== STATISTICS (СТАТИСТИКА) =====
 
     async def get_stats_for_period(self, start_date: datetime, end_date: datetime) -> Dict[str, Any]:

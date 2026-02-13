@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import settings
 from database.catalog_repo import CatalogRepo
 from database.orders_repo import OrdersRepo
-from models import Category, Brand, Product, User, CartItem, UserRole
+from models import Category, Brand, Product, User, CartItem, UserRole, OrderStatus
 from models.users import normalize_role
 
 client_router = Router()
@@ -49,8 +49,19 @@ def _client_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🛍 Каталог"), KeyboardButton(text="🛒 Корзина")],
-            [KeyboardButton(text="📦 Мои заказы"), KeyboardButton(text="✨ AI-Консультант")],
+            [KeyboardButton(text="📦 Заказы"), KeyboardButton(text="✨ AI-Консультант")],
             [KeyboardButton(text="💬 Поддержка")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def _orders_menu_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="✅ История покупок")],
+            [KeyboardButton(text="🚚 Заказы в пути")],
+            [KeyboardButton(text="🏠 Меню")],
         ],
         resize_keyboard=True,
     )
@@ -885,7 +896,12 @@ async def process_order_phone(message: Message, state: FSMContext, session: Asyn
 
     await state.clear()
 
-@client_router.message(F.text == "📦 Мои заказы")
+@client_router.message(F.text == "📦 Заказы")
+async def cmd_orders_menu(message: Message, session: AsyncSession) -> None:
+    await message.answer("Выберите раздел заказов:", reply_markup=_orders_menu_kb())
+
+
+@client_router.message(F.text == "✅ История покупок")
 async def cmd_my_orders_history(message: Message, session: AsyncSession) -> None:
     stmt = select(User).where(User.tg_id == message.from_user.id)
     res = await session.execute(stmt)
@@ -930,6 +946,64 @@ async def cmd_my_orders_history(message: Message, session: AsyncSession) -> None
             f"💰 <b>Итого: {total_fmt} ₽</b>"
         )
         
+        await message.answer(msg_text, parse_mode="HTML")
+        await asyncio.sleep(0.1)
+
+
+@client_router.message(F.text == "🚚 Заказы в пути")
+async def cmd_active_orders(message: Message, session: AsyncSession) -> None:
+    stmt = select(User).where(User.tg_id == message.from_user.id)
+    res = await session.execute(stmt)
+    user = res.scalar_one_or_none()
+
+    if not user:
+        await message.answer("Сначала нажмите /start")
+        return
+
+    repo = OrdersRepo(session)
+    orders = await repo.get_user_active_orders(user.id)
+
+    if not orders:
+        await message.answer("🚚 У вас нет заказов в пути.")
+        return
+
+    await message.answer(
+        f"🚚 <b>Заказы в пути ({len(orders)} шт.):</b>",
+        parse_mode="HTML",
+    )
+
+    status_labels = {
+        OrderStatus.NEW.value: "Новый",
+        OrderStatus.PROCESSING.value: "В обработке",
+    }
+
+    for order in orders:
+        items_lines = []
+        for item in order.items:
+            if item.product:
+                brand = item.product.brand.name if item.product.brand else ""
+                title = item.product.title
+                sku = item.product.sku if item.product.sku else None
+                sku_part = f" [{sku}]" if sku else ""
+                name_str = f"{brand} {title}{sku_part}"
+            else:
+                name_str = "Товар удалён"
+
+            price_fmt = f"{item.sale_price:g}"
+            items_lines.append(f"— {name_str} ({item.size}) x{item.quantity} = {price_fmt} ₽")
+
+        items_text = "\n".join(items_lines)
+        date_str = order.created_at.strftime('%d.%m.%Y')
+        total_fmt = f"{order.total_price:g}"
+        status_text = status_labels.get(order.status, order.status)
+
+        msg_text = (
+            f"🧾 <b>Заказ #{order.id} от {date_str}</b>\n"
+            f"Статус: <b>{status_text}</b>\n"
+            f"{items_text}\n"
+            f"💰 <b>Итого: {total_fmt} ₽</b>"
+        )
+
         await message.answer(msg_text, parse_mode="HTML")
         await asyncio.sleep(0.1)
 

@@ -83,7 +83,7 @@ async def start_handler(message: Message, session: AsyncSession) -> None:
         kb = ReplyKeyboardMarkup(
             keyboard=[
                 [KeyboardButton(text="🛍 Каталог"), KeyboardButton(text="🛒 Корзина")],
-                [KeyboardButton(text="📦 Мои заказы"), KeyboardButton(text="✨ AI-Консультант")],
+                [KeyboardButton(text="📦 Заказы"), KeyboardButton(text="✨ AI-Консультант")],
                 [KeyboardButton(text="💬 Продавец"), KeyboardButton(text="💬 Владелец")],
             ],
             resize_keyboard=True,
