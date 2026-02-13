@@ -594,10 +594,7 @@ async def staff_cash_menu(message: Message, session: AsyncSession) -> None:
 
 # ---------- СТАТИСТИКА ----------
 
-@main_router.message(F.text == "📈 Статистика")
-async def owner_stats_menu(message: Message, session: AsyncSession) -> None:
-    if not await ensure_owner(message, session): 
-        return
+async def _render_stats_menu(message: Message, edit: bool) -> None:
     kb = InlineKeyboardBuilder()
     kb.button(text="📅 За сегодня", callback_data="stats:day")
     kb.button(text="🗓 За 7 дней", callback_data="stats:week")
@@ -605,10 +602,30 @@ async def owner_stats_menu(message: Message, session: AsyncSession) -> None:
     kb.button(text="🏆 Топ товаров", callback_data="stats:top")
     kb.button(text="❌ Закрыть", callback_data="owner:cancel")
     kb.adjust(1)
-    await message.answer("📊 <b>Панель аналитики:</b>", reply_markup=kb.as_markup(), parse_mode="HTML")
+
+    if edit:
+        await message.edit_text(
+            "📊 <b>Панель аналитики:</b>",
+            reply_markup=kb.as_markup(),
+            parse_mode="HTML",
+        )
+    else:
+        await message.answer(
+            "📊 <b>Панель аналитики:</b>",
+            reply_markup=kb.as_markup(),
+            parse_mode="HTML",
+        )
+
+@main_router.message(F.text == "📈 Статистика")
+async def owner_stats_menu(message: Message, session: AsyncSession) -> None:
+    if not await ensure_owner(message, session): 
+        return
+    await _render_stats_menu(message, edit=False)
 
 @main_router.callback_query(F.data.startswith("stats:"))
 async def owner_stats_show(callback: CallbackQuery, session: AsyncSession) -> None:
+    if not await ensure_owner(callback, session):
+        return
     period = callback.data.split(":")[1]
     repo = OrdersRepo(session)
     now = datetime.utcnow()
@@ -634,9 +651,11 @@ async def owner_stats_show(callback: CallbackQuery, session: AsyncSession) -> No
         kb.button(text="🔙 Назад", callback_data="stats:menu")
         await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
         return
+    elif period == "menu":
+        await _render_stats_menu(callback.message, edit=True)
+        return
     else:
         await callback.message.delete()
-        await owner_stats_menu(callback.message)
         return
 
     stats = await repo.get_stats_for_period(start_date, now)
