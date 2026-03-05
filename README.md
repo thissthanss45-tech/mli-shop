@@ -1,6 +1,6 @@
 # MLI Shop — Telegram-магазин + Web Storefront
 
-![CI](https://github.com/YOUR_GITHUB_USERNAME/mli_shop_project/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/thissthanss45-tech/mli_shop_project/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11-blue)
 ![aiogram](https://img.shields.io/badge/aiogram-3.x-009ddc)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-00c7b7)
