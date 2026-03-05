@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime
+from html import escape
 
 from aiogram import Router, F, Bot
 from aiogram.filters import Command
@@ -26,8 +28,13 @@ from database.catalog_repo import CatalogRepo
 from database.orders_repo import OrdersRepo
 from models import Category, Brand, Product, User, CartItem, UserRole, OrderStatus
 from models.users import normalize_role
+from utils.error_policy import safe_delete_message, safe_edit_text
 
 client_router = Router()
+logger = logging.getLogger(__name__)
+
+CLIENT_HISTORY_PAGE_SIZE = 4
+CLIENT_ACTIVE_PAGE_SIZE = 4
 
 # ---------- FSM (Машина состояний) ----------
 
@@ -48,9 +55,9 @@ class ClientStates(StatesGroup):
 def _client_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🛍 Каталог"), KeyboardButton(text="🛒 Корзина")],
-            [KeyboardButton(text="📦 Заказы"), KeyboardButton(text="✨ AI-Консультант")],
-            [KeyboardButton(text="💬 Поддержка")],
+            [KeyboardButton(text=settings.button_catalog), KeyboardButton(text=settings.button_cart)],
+            [KeyboardButton(text=settings.button_orders), KeyboardButton(text=settings.button_ai)],
+            [KeyboardButton(text=settings.button_support)],
         ],
         resize_keyboard=True,
     )
@@ -68,7 +75,7 @@ def _orders_menu_kb() -> ReplyKeyboardMarkup:
 
 
 def _is_back_text(text: str | None) -> bool:
-    return text in {"⬅ Назад", "🔙 Назад", "❌ Отмена", "🏠 Меню"}
+    return text in {"⬅ Назад", "🔙 Назад", "↩️ Назад", "Отмена", "🏠 Меню"}
 
 
 def _build_support_reply_kb(client_id: int, can_block: bool, is_blocked: bool) -> InlineKeyboardBuilder:
@@ -177,6 +184,145 @@ def build_cart_kb(items: list[CartItem]) -> InlineKeyboardBuilder:
     return kb
 
 
+def _build_client_history_kb(page: int, total_pages: int) -> InlineKeyboardBuilder:
+    kb = InlineKeyboardBuilder()
+    nav_count = 0
+    if total_pages > 1 and page > 1:
+        kb.button(text="⬅️", callback_data=f"client:history:page:{page - 1}")
+        nav_count += 1
+    kb.button(text=f"{page}/{total_pages}", callback_data="client:history:noop")
+    nav_count += 1
+    if total_pages > 1 and page < total_pages:
+        kb.button(text="➡️", callback_data=f"client:history:page:{page + 1}")
+        nav_count += 1
+
+    kb.button(text="🔙 К заказам", callback_data="client:history:menu")
+    kb.adjust(max(1, nav_count), 1)
+    return kb
+
+
+def _build_client_active_orders_kb(page: int, total_pages: int) -> InlineKeyboardBuilder:
+    kb = InlineKeyboardBuilder()
+    nav_count = 0
+    if total_pages > 1 and page > 1:
+        kb.button(text="⬅️", callback_data=f"client:active:page:{page - 1}")
+        nav_count += 1
+    kb.button(text=f"{page}/{total_pages}", callback_data="client:active:noop")
+    nav_count += 1
+    if total_pages > 1 and page < total_pages:
+        kb.button(text="➡️", callback_data=f"client:active:page:{page + 1}")
+        nav_count += 1
+
+    kb.button(text="🔙 К заказам", callback_data="client:active:menu")
+    kb.adjust(max(1, nav_count), 1)
+    return kb
+
+
+def _build_client_order_cancel_kb(order_id: int, confirming: bool = False) -> InlineKeyboardBuilder:
+    kb = InlineKeyboardBuilder()
+    if confirming:
+        kb.button(text="✅ Подтвердить отмену", callback_data=f"client:order:cancel_do:{order_id}")
+        kb.button(text="↩️ Не отменять", callback_data=f"client:order:cancel_keep:{order_id}")
+        kb.adjust(1)
+    else:
+        kb.button(text="🗑 Отменить заказ", callback_data=f"client:order:cancel_confirm:{order_id}")
+        kb.adjust(1)
+    return kb
+
+
+async def _render_client_orders_history(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    page: int,
+    edit: bool,
+    requester_user_id: int | None = None,
+) -> None:
+    user_tg_id = requester_user_id if requester_user_id is not None else message.from_user.id
+
+    stmt = select(User).where(User.tg_id == user_tg_id)
+    user = (await session.execute(stmt)).scalar_one_or_none()
+    if not user:
+        if edit:
+            await message.edit_text("Сначала нажмите /start")
+        else:
+            await message.answer("Сначала нажмите /start")
+        return
+
+    repo = OrdersRepo(session)
+    orders = await repo.get_user_completed_orders(user.id)
+
+    if not orders:
+        if edit:
+            await message.edit_text("📭 У вас пока нет завершенных покупок.")
+        else:
+            await message.answer("📭 У вас пока нет завершенных покупок.")
+        await state.update_data(client_history_msg_ids=[])
+        return
+
+    total_count = len(orders)
+    total_pages = max(1, (total_count + CLIENT_HISTORY_PAGE_SIZE - 1) // CLIENT_HISTORY_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    offset = (page - 1) * CLIENT_HISTORY_PAGE_SIZE
+    orders_slice = orders[offset:offset + CLIENT_HISTORY_PAGE_SIZE]
+
+    data = await state.get_data()
+    old_ids = data.get("client_history_msg_ids", [])
+    current_msg_id = getattr(message, "message_id", None)
+    if old_ids:
+        for msg_id in old_ids:
+            if current_msg_id and msg_id == current_msg_id:
+                continue
+            try:
+                await message.bot.delete_message(chat_id=message.chat.id, message_id=msg_id)
+            except Exception:
+                continue
+        await state.update_data(client_history_msg_ids=[])
+
+    header_text = (
+        f"📦 <b>История ваших покупок</b>\n"
+        f"Страница {page}/{total_pages} | Всего заказов: {total_count}"
+    )
+    header_kb = _build_client_history_kb(page, total_pages)
+
+    if edit:
+        await message.edit_text(header_text, parse_mode="HTML", reply_markup=header_kb.as_markup())
+    else:
+        await message.answer(header_text, parse_mode="HTML", reply_markup=header_kb.as_markup())
+
+    sent_ids: list[int] = []
+    for order in orders_slice:
+        items_lines = []
+        for item in order.items:
+            if item.product:
+                brand = item.product.brand.name if item.product.brand else ""
+                title = item.product.title
+                sku = item.product.sku if item.product.sku else None
+                sku_part = f" [{sku}]" if sku else ""
+                name_str = f"{brand} {title}{sku_part}"
+            else:
+                name_str = "Товар удалён"
+
+            price_fmt = f"{item.sale_price:g}"
+            items_lines.append(f"— {name_str} ({item.size}) x{item.quantity} = {price_fmt} ₽")
+
+        items_text = "\n".join(items_lines)
+        date_str = order.created_at.strftime('%d.%m.%Y')
+        total_fmt = f"{order.total_price:g}"
+
+        msg_text = (
+            f"✅ <b>Заказ #{order.id} от {date_str}</b>\n"
+            f"{items_text}\n"
+            f"💰 <b>Итого: {total_fmt} ₽</b>"
+        )
+
+        sent = await message.answer(msg_text, parse_mode="HTML")
+        sent_ids.append(sent.message_id)
+        await asyncio.sleep(0.05)
+
+    await state.update_data(client_history_msg_ids=sent_ids, client_history_page=page)
+
+
 # ---------- Команды (Меню) ----------
 
 @client_router.message(Command("catalog"))
@@ -218,7 +364,7 @@ async def start_chat_with_owner(message: Message, state: FSMContext, session: As
     )
 
 
-@client_router.message(F.text == "💬 Поддержка")
+@client_router.message(F.text == settings.button_support)
 async def open_support_menu(message: Message, state: FSMContext) -> None:
     kb = ReplyKeyboardMarkup(
         keyboard=[
@@ -506,21 +652,23 @@ async def cq_category(callback: CallbackQuery, session: AsyncSession) -> None:
 
     total_count = await repo.count_brands_by_category(category_id)
     if total_count == 0:
-        if callback.message.photo:
-            await callback.message.delete()
-            await callback.message.answer(
-                f"В категории <b>{cat.name}</b> пока нет товаров (и брендов).",
-                parse_mode="HTML"
-            )
-        else:
-            await callback.message.edit_text(
-                f"В категории <b>{cat.name}</b> пока нет товаров (и брендов).",
-                parse_mode="HTML"
-            )
+        try:
+            if callback.message.photo:
+                await callback.message.delete()
+                await callback.message.answer(
+                    f"В категории <b>{cat.name}</b> пока нет товаров (и брендов).",
+                    parse_mode="HTML"
+                )
+            else:
+                await callback.message.edit_text(
+                    f"В категории <b>{cat.name}</b> пока нет товаров (и брендов).",
+                    parse_mode="HTML"
+                )
+        finally:
+            await callback.answer()
         return
 
     await show_brands_page(callback, session, category_id, page=1)
-    await callback.answer()
     return
 
 @client_router.callback_query(F.data.startswith("brandpage:"))
@@ -550,7 +698,10 @@ async def show_brands_page(
     text = f"📂 Категория: <b>{cat.name}</b>\nВыберите бренд:"
 
     if callback.message.photo:
-        await callback.message.delete()
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
         await callback.message.answer(
             text,
             reply_markup=kb.as_markup(),
@@ -593,13 +744,17 @@ async def show_products_page(callback: CallbackQuery, session: AsyncSession, cat
     text = f"🏷 Бренд: <b>{brand_name}</b>\nВыберите модель:"
 
     if callback.message.photo:
-        await callback.message.delete()
+        await safe_delete_message(callback.message, logger, "show_products_page.photo")
         await callback.message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
     else:
-        try:
-            await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
-        except Exception:
-            pass
+        await safe_edit_text(
+            callback.message,
+            logger,
+            "show_products_page.text",
+            text,
+            reply_markup=kb.as_markup(),
+            parse_mode="HTML",
+        )
             
     await callback.answer()
 
@@ -624,7 +779,12 @@ async def cq_product(callback: CallbackQuery, state: FSMContext, session: AsyncS
 
         repo = CatalogRepo(session)
         product = await repo.get_product_with_details(product_id)
-    except Exception as e:
+    except (IndexError, ValueError) as exc:
+        logger.warning("Invalid product callback payload: %s (%s)", callback.data, exc)
+        await callback.answer("Некорректный формат запроса.", show_alert=True)
+        return
+    except Exception as exc:
+        logger.exception("Failed to resolve product card callback=%s: %s", callback.data, exc)
         await callback.answer("Ошибка обработки запроса. Проверьте логи.", show_alert=True)
         return
 
@@ -635,7 +795,7 @@ async def cq_product(callback: CallbackQuery, state: FSMContext, session: AsyncS
     stmt = select(User).where(User.tg_id == callback.from_user.id)
     res = await session.execute(stmt)
     user = res.scalar_one_or_none()
-    is_staff = user is not None and normalize_role(user.role) == UserRole.STAFF.value
+    is_staff = user is not None and (normalize_role(user.role) in (UserRole.STAFF.value, UserRole.OWNER.value) or callback.from_user.id == settings.owner_id)
 
     available_sizes = [f"{s.size}" for s in product.stock if s.quantity > 0]
     sizes_str = ", ".join(available_sizes) if available_sizes else "Нет в наличии"
@@ -647,7 +807,8 @@ async def cq_product(callback: CallbackQuery, state: FSMContext, session: AsyncS
     text = (
         f"🏷 {product.title}\n"
         f"🏷️ Бренд: {brand_name}\n"
-        f"🔖 SKU: {product.sku}\n\n"
+        f"🔖 SKU: {product.sku}\n"
+        f"🆔 ID: {product.id}\n\n"
         f"💰 Цена: {product.sale_price} ₽\n"
         f"📏 Размеры в наличии: {sizes_str}\n"
     )
@@ -667,13 +828,13 @@ async def cq_product(callback: CallbackQuery, state: FSMContext, session: AsyncS
         else:
             kb.button(text="🚫 Нет в наличии", callback_data="ignore")
     
-    kb.button(text="⬅ Назад", callback_data=f"back:products:{category_id}:{brand_id}")
+    if category_id == 0 and brand_id == 0:
+        kb.button(text="↩️ Закрыть", callback_data="ignore")
+    else:
+        kb.button(text="⬅ Назад", callback_data=f"back:products:{category_id}:{brand_id}")
     kb.adjust(1)
 
-    try:
-        await callback.message.delete()
-    except:
-        pass
+    await safe_delete_message(callback.message, logger, "cq_product.card")
 
     if product.photos:
         if len(product.photos) > 1:
@@ -700,16 +861,32 @@ async def cq_product(callback: CallbackQuery, state: FSMContext, session: AsyncS
 
 @client_router.callback_query(F.data == "back:categories")
 async def cq_back_categories(callback: CallbackQuery, session: AsyncSession) -> None:
-    await callback.message.delete()
-    await cmd_catalog(callback.message, session)
+    try:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await cmd_catalog(callback.message, session)
+    finally:
+        await callback.answer()
 
 @client_router.callback_query(F.data == "catalog_start")
 async def cq_catalog_start(callback: CallbackQuery, session: AsyncSession) -> None:
-    await callback.message.delete()
-    await cmd_catalog(callback.message, session)
+    try:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await cmd_catalog(callback.message, session)
+    finally:
+        await callback.answer()
 
 @client_router.callback_query(F.data == "ignore")
 async def cq_ignore(callback: CallbackQuery) -> None:
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
     await callback.answer()
 
 @client_router.callback_query(F.data.startswith("back:brands:"))
@@ -724,7 +901,6 @@ async def cq_back_products(callback: CallbackQuery, session: AsyncSession) -> No
     parts = callback.data.split(":")
     category_id = int(parts[2])
     brand_id = int(parts[3])
-    
     await show_products_page(callback, session, category_id, brand_id, page=1)
 
 
@@ -772,9 +948,11 @@ async def process_size_input(message: Message, state: FSMContext, session: Async
 
 # ---------- Управление корзиной ----------
 
-@client_router.callback_query(F.data == "show:cart")
-async def cq_show_cart_cb(callback: CallbackQuery, session: AsyncSession) -> None:
-    await callback.message.delete()
+async def _show_cart_from_callback(callback: CallbackQuery, session: AsyncSession) -> None:
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
     await show_cart_for(
         user_id=callback.from_user.id,
         username=callback.from_user.username,
@@ -782,6 +960,13 @@ async def cq_show_cart_cb(callback: CallbackQuery, session: AsyncSession) -> Non
         message=callback.message,
         session=session,
     )
+
+@client_router.callback_query(F.data == "show:cart")
+async def cq_show_cart_cb(callback: CallbackQuery, session: AsyncSession) -> None:
+    try:
+        await _show_cart_from_callback(callback, session)
+    finally:
+        await callback.answer()
 
 @client_router.callback_query(F.data.startswith("cart:del:"))
 async def cq_cart_del(callback: CallbackQuery, session: AsyncSession) -> None:
@@ -795,8 +980,8 @@ async def cq_cart_del(callback: CallbackQuery, session: AsyncSession) -> None:
     await orders_repo.delete_cart_item(user, item_id)
     await session.commit()
 
+    await _show_cart_from_callback(callback, session)
     await callback.answer("Удалено")
-    await cq_show_cart_cb(callback, session)
 
 
 # ---------- ОФОРМЛЕНИЕ ЗАКАЗА (Checkout) ----------
@@ -872,10 +1057,11 @@ async def process_order_phone(message: Message, state: FSMContext, session: Asyn
         items_list_text += f"— {brand} {title}{sku_part} ({it.size}) x{it.quantity}\n"
 
     try:
+        safe_username = escape(message.from_user.username or "") if message.from_user.username else "—"
         admin_text = (
             f"🔔 <b>НОВЫЙ ЗАКАЗ #{order.id}</b>\n"
-            f"👤 Клиент: {full_name} (@{message.from_user.username})\n"
-            f"📱 Телефон: {phone}\n"
+            f"👤 Клиент: {escape(full_name or '')} (@{safe_username})\n"
+            f"📱 Телефон: {escape(phone or '')}\n"
             f"💰 Сумма: {order.total_price} ₽\n\n"
             f"📦 <b>Состав заказа:</b>\n"
             f"{items_list_text}"
@@ -889,95 +1075,114 @@ async def process_order_phone(message: Message, state: FSMContext, session: Asyn
                 continue
             try:
                 await bot.send_message(staff_id, admin_text, parse_mode="HTML")
-            except Exception:
+            except Exception as exc:
+                logger.warning("Failed to send order notification to staff %s: %s", staff_id, exc)
                 continue
-    except Exception as e:
-        print(f"Ошибка отправки уведомления владельцу: {e}")
+    except Exception as exc:
+        logger.error("Failed to send order notification to owner: %s", exc)
 
     await state.clear()
 
-@client_router.message(F.text == "📦 Заказы")
+@client_router.message(F.text == settings.button_orders)
 async def cmd_orders_menu(message: Message, session: AsyncSession) -> None:
     await message.answer("Выберите раздел заказов:", reply_markup=_orders_menu_kb())
 
 
 @client_router.message(F.text == "✅ История покупок")
-async def cmd_my_orders_history(message: Message, session: AsyncSession) -> None:
-    stmt = select(User).where(User.tg_id == message.from_user.id)
-    res = await session.execute(stmt)
-    user = res.scalar_one_or_none()
+async def cmd_my_orders_history(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    await _render_client_orders_history(message, state, session, page=1, edit=False, requester_user_id=message.from_user.id)
 
-    if not user:
-        await message.answer("Сначала нажмите /start")
+
+@client_router.callback_query(F.data.startswith("client:history:"))
+async def client_orders_history_cb(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    parts = callback.data.split(":")
+    action = parts[2] if len(parts) > 2 else ""
+
+    if action == "page" and len(parts) == 4 and parts[3].isdigit():
+        page = int(parts[3])
+        await _render_client_orders_history(callback.message, state, session, page=page, edit=True, requester_user_id=callback.from_user.id)
+        await callback.answer()
         return
 
-    repo = OrdersRepo(session)
-    orders = await repo.get_user_completed_orders(user.id)
-
-    if not orders:
-        await message.answer("📭 У вас пока нет завершенных покупок.")
+    if action == "noop":
+        await callback.answer()
         return
 
-    await message.answer(f"📦 <b>История ваших покупок ({len(orders)} шт.):</b>", parse_mode="HTML")
+    if action == "menu":
+        await safe_delete_message(callback.message, logger, "client_orders_history.menu")
+        await callback.message.answer("Выберите раздел заказов:", reply_markup=_orders_menu_kb())
+        await callback.answer()
+        return
 
-    for order in orders:
-        items_lines = []
-        for item in order.items:
-            if item.product:
-                brand = item.product.brand.name if item.product.brand else ""
-                title = item.product.title
-                sku = item.product.sku if item.product.sku else None
-                sku_part = f" [{sku}]" if sku else ""
-                name_str = f"{brand} {title}{sku_part}"
-            else:
-                name_str = "Товар удалён"
-            
-            price_fmt = f"{item.sale_price:g}"
-            
-            items_lines.append(f"— {name_str} ({item.size}) x{item.quantity} = {price_fmt} ₽")
-
-        items_text = "\n".join(items_lines)
-        date_str = order.created_at.strftime('%d.%m.%Y')
-        total_fmt = f"{order.total_price:g}"
-
-        msg_text = (
-            f"✅ <b>Заказ #{order.id} от {date_str}</b>\n"
-            f"{items_text}\n"
-            f"💰 <b>Итого: {total_fmt} ₽</b>"
-        )
-        
-        await message.answer(msg_text, parse_mode="HTML")
-        await asyncio.sleep(0.1)
+    await callback.answer()
 
 
-@client_router.message(F.text == "🚚 Заказы в пути")
-async def cmd_active_orders(message: Message, session: AsyncSession) -> None:
-    stmt = select(User).where(User.tg_id == message.from_user.id)
-    res = await session.execute(stmt)
-    user = res.scalar_one_or_none()
+async def _render_client_active_orders(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    page: int,
+    edit: bool,
+    requester_user_id: int | None = None,
+) -> None:
+    user_tg_id = requester_user_id if requester_user_id is not None else message.from_user.id
 
+    stmt = select(User).where(User.tg_id == user_tg_id)
+    user = (await session.execute(stmt)).scalar_one_or_none()
     if not user:
-        await message.answer("Сначала нажмите /start")
+        if edit:
+            await message.edit_text("Сначала нажмите /start")
+        else:
+            await message.answer("Сначала нажмите /start")
         return
 
     repo = OrdersRepo(session)
     orders = await repo.get_user_active_orders(user.id)
-
     if not orders:
-        await message.answer("🚚 У вас нет заказов в пути.")
+        if edit:
+            await message.edit_text("🚚 У вас нет заказов в пути.")
+        else:
+            await message.answer("🚚 У вас нет заказов в пути.")
+        await state.update_data(client_active_msg_ids=[])
         return
 
-    await message.answer(
-        f"🚚 <b>Заказы в пути ({len(orders)} шт.):</b>",
-        parse_mode="HTML",
+    total_count = len(orders)
+    total_pages = max(1, (total_count + CLIENT_ACTIVE_PAGE_SIZE - 1) // CLIENT_ACTIVE_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    offset = (page - 1) * CLIENT_ACTIVE_PAGE_SIZE
+    orders_slice = orders[offset:offset + CLIENT_ACTIVE_PAGE_SIZE]
+
+    data = await state.get_data()
+    old_ids = data.get("client_active_msg_ids", [])
+    current_msg_id = getattr(message, "message_id", None)
+    if old_ids:
+        for msg_id in old_ids:
+            if current_msg_id and msg_id == current_msg_id:
+                continue
+            try:
+                await message.bot.delete_message(chat_id=message.chat.id, message_id=msg_id)
+            except Exception:
+                continue
+        await state.update_data(client_active_msg_ids=[])
+
+    header_text = (
+        f"🚚 <b>Заказы в пути</b>\n"
+        f"Страница {page}/{total_pages} | Всего заказов: {total_count}"
     )
+    header_kb = _build_client_active_orders_kb(page, total_pages)
+
+    if edit:
+        await message.edit_text(header_text, parse_mode="HTML", reply_markup=header_kb.as_markup())
+    else:
+        await message.answer(header_text, parse_mode="HTML", reply_markup=header_kb.as_markup())
 
     status_labels = {
         OrderStatus.NEW.value: "Новый",
         OrderStatus.PROCESSING.value: "В обработке",
     }
 
-    for order in orders:
+    sent_ids: list[int] = []
+    for order in orders_slice:
         items_lines = []
         for item in order.items:
             if item.product:
@@ -1004,16 +1209,122 @@ async def cmd_active_orders(message: Message, session: AsyncSession) -> None:
             f"💰 <b>Итого: {total_fmt} ₽</b>"
         )
 
-        await message.answer(msg_text, parse_mode="HTML")
-        await asyncio.sleep(0.1)
+        sent = await message.answer(
+            msg_text,
+            parse_mode="HTML",
+            reply_markup=_build_client_order_cancel_kb(order.id).as_markup(),
+        )
+        sent_ids.append(sent.message_id)
+        await asyncio.sleep(0.05)
+
+    await state.update_data(client_active_msg_ids=sent_ids, client_active_page=page)
+
+
+@client_router.message(F.text == "🚚 Заказы в пути")
+async def cmd_active_orders(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    await _render_client_active_orders(message, state, session, page=1, edit=False, requester_user_id=message.from_user.id)
+
+
+@client_router.callback_query(F.data.startswith("client:active:"))
+async def client_active_orders_cb(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    parts = callback.data.split(":")
+    action = parts[2] if len(parts) > 2 else ""
+
+    if action == "page" and len(parts) == 4 and parts[3].isdigit():
+        page = int(parts[3])
+        await _render_client_active_orders(callback.message, state, session, page=page, edit=True, requester_user_id=callback.from_user.id)
+        await callback.answer()
+        return
+
+    if action == "noop":
+        await callback.answer()
+        return
+
+    if action == "menu":
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.answer("Выберите раздел заказов:", reply_markup=_orders_menu_kb())
+        await callback.answer()
+        return
+
+    await callback.answer()
+
+
+@client_router.callback_query(F.data.startswith("client:order:cancel_confirm:"))
+async def client_cancel_order_confirm(callback: CallbackQuery, session: AsyncSession) -> None:
+    order_id = int(callback.data.split(":")[-1])
+
+    stmt = select(User).where(User.tg_id == callback.from_user.id)
+    user = (await session.execute(stmt)).scalar_one_or_none()
+    if not user:
+        await callback.answer("Сначала нажмите /start", show_alert=True)
+        return
+
+    repo = OrdersRepo(session)
+    active_orders = await repo.get_user_active_orders(user.id)
+    target_order = next((order for order in active_orders if order.id == order_id), None)
+    if not target_order:
+        await callback.answer("Заказ уже недоступен для отмены", show_alert=True)
+        return
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=_build_client_order_cancel_kb(order_id, confirming=True).as_markup())
+    except Exception:
+        pass
+    await callback.answer("Подтвердите отмену")
+
+
+@client_router.callback_query(F.data.startswith("client:order:cancel_keep:"))
+async def client_cancel_order_keep(callback: CallbackQuery) -> None:
+    order_id = int(callback.data.split(":")[-1])
+    try:
+        await callback.message.edit_reply_markup(reply_markup=_build_client_order_cancel_kb(order_id, confirming=False).as_markup())
+    except Exception:
+        pass
+    await callback.answer("Отмена не выполнена")
+
+
+@client_router.callback_query(F.data.startswith("client:order:cancel_do:"))
+async def client_cancel_active_order(callback: CallbackQuery, session: AsyncSession) -> None:
+    order_id = int(callback.data.split(":")[-1])
+
+    stmt = select(User).where(User.tg_id == callback.from_user.id)
+    user = (await session.execute(stmt)).scalar_one_or_none()
+    if not user:
+        await callback.answer("Сначала нажмите /start", show_alert=True)
+        return
+
+    repo = OrdersRepo(session)
+    active_orders = await repo.get_user_active_orders(user.id)
+    target_order = next((order for order in active_orders if order.id == order_id), None)
+    if not target_order:
+        await callback.answer("Заказ уже недоступен для отмены", show_alert=True)
+        return
+
+    ok = await repo.cancel_order(order_id)
+    if not ok:
+        await callback.answer("Не удалось отменить заказ", show_alert=True)
+        return
+
+    await session.commit()
+    try:
+        await callback.message.edit_text(
+            f"🗑 <b>Заказ #{order_id} отменён.</b>\nТовары возвращены на склад.",
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+    await callback.answer("Заказ отменён")
 
 # ---------- Текстовое меню ----------
 
-@client_router.message(F.text.in_(["🛍 Каталог", "📦 Каталог", "🏪 Витрина"]))
+@client_router.message(F.text.in_([settings.button_catalog, "📦 Каталог", "🏪 Витрина"]))
 async def menu_catalog_text(message: Message, session: AsyncSession):
     await cmd_catalog(message, session)
 
-@client_router.message(F.text == "🛒 Корзина")
+@client_router.message(F.text == settings.button_cart)
 async def menu_cart_text(message: Message, session: AsyncSession):
     await cmd_cart(message, session)
 

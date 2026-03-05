@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MLI Shop</title>
+  <link rel="stylesheet" href="/web/styles.css" />
+</head>
+<body>
+  <div class="bg-glow bg-glow--1"></div>
+  <div class="bg-glow bg-glow--2"></div>
+
+  <header class="header">
+    <div class="container header__inner">
+      <div>
+        <p class="badge">MLI SHOP</p>
+        <h1>Каталог магазина</h1>
+        <p class="subtitle">Красивый storefront поверх вашего текущего FastAPI + PostgreSQL</p>
+      </div>
+      <div class="header-actions">
+        <a class="docs-link" href="/admin">🛠 Админ</a>
+        <a class="docs-link" href="/about">🏬 О магазине</a>
+        <a class="docs-link" href="/docs" target="_blank" rel="noreferrer">API Docs</a>
+        <a class="docs-link" href="/ai-chat">✨ AI чат</a>
+        <a class="cart-pill" href="/cart">🛒 Корзина: <b id="cart-count">0</b></a>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="controls">
+      <div class="control">
+        <label for="search">Поиск</label>
+        <input id="search" type="text" placeholder="Например: Брюки" />
+      </div>
+      <div class="control">
+        <label for="category">Категория ID</label>
+        <input id="category" type="number" min="1" placeholder="Все" />
+      </div>
+      <div class="control control--small">
+        <label for="limit">Лимит</label>
+        <input id="limit" type="number" min="1" max="200" value="24" />
+      </div>
+      <button id="refresh" class="btn">Обновить</button>
+    </section>
+
+    <section class="meta" id="meta">Загрузка каталога…</section>
+    <section class="grid" id="grid"></section>
+  </main>
+
+  <template id="card-template">
+    <article class="card">
+      <img class="card__image" src="" alt="Фото товара" loading="lazy" />
+      <div class="card__top">
+        <h3 class="card__title"></h3>
+        <span class="card__price"></span>
+      </div>
+      <p class="card__desc"></p>
+      <div class="card__tags">
+        <span class="tag tag--cat"></span>
+        <span class="tag tag--brand"></span>
+        <span class="tag tag--stock"></span>
+      </div>
+      <div class="card__actions">
+        <a class="card__more" href="#">Подробнее</a>
+        <button class="card__buy" type="button">Купить</button>
+      </div>
+    </article>
+  </template>
+
+  <script>
+    const grid = document.getElementById('grid');
+    const meta = document.getElementById('meta');
+    const template = document.getElementById('card-template');
+
+    const searchInput = document.getElementById('search');
+    const categoryInput = document.getElementById('category');
+    const limitInput = document.getElementById('limit');
+    const refreshBtn = document.getElementById('refresh');
+    const cartCount = document.getElementById('cart-count');
+
+    function readCart() {
+      try {
+        const raw = localStorage.getItem('mli_cart') || '[]';
+        return JSON.parse(raw);
+      } catch {
+        return [];
+      }
+    }
+
+    function writeCart(items) {
+      localStorage.setItem('mli_cart', JSON.stringify(items));
+      cartCount.textContent = String(items.length);
+    }
+
+    function addToCart(item) {
+      const cart = readCart();
+      if (!cart.find((x) => x.id === item.id)) {
+        cart.push({
+          id: item.id,
+          name: item.name,
+          description: item.description,
+          price: item.price,
+          category_id: item.category_id,
+          category_name: item.category_name,
+          brand_id: item.brand_id,
+          brand_name: item.brand_name,
+          image_url: item.image_url,
+        });
+        writeCart(cart);
+      }
+    }
+
+    function formatPrice(value) {
+      return new Intl.NumberFormat('ru-RU').format(value) + ' ₽';
+    }
+
+    function renderCards(items) {
+      grid.innerHTML = '';
+      if (!items.length) {
+        grid.innerHTML = '<p class="empty">По вашему запросу товары не найдены.</p>';
+        return;
+      }
+
+      for (const item of items) {
+        const node = template.content.cloneNode(true);
+        node.querySelector('.card__title').textContent = item.name;
+        node.querySelector('.card__price').textContent = formatPrice(item.price);
+        node.querySelector('.card__desc').textContent = item.description || 'Описание не указано';
+        node.querySelector('.tag--cat').textContent = item.category_name
+          ? `Категория: ${item.category_name}`
+          : `Категория #${item.category_id}`;
+        node.querySelector('.tag--brand').textContent = item.brand_name
+          ? `Бренд: ${item.brand_name}`
+          : `Бренд #${item.brand_id ?? '—'}`;
+        node.querySelector('.tag--stock').textContent = `В наличии: ${item.stock}`;
+        const image = node.querySelector('.card__image');
+        image.src = item.image_url || '/web/no-image.svg';
+        image.onerror = () => {
+          image.src = '/web/no-image.svg';
+        };
+        node.querySelector('.card__more').href = `/product/${item.id}`;
+        node.querySelector('.card__buy').addEventListener('click', () => {
+          addToCart(item);
+          node.querySelector('.card__buy').textContent = 'Добавлено ✓';
+          setTimeout(() => {
+            node.querySelector('.card__buy').textContent = 'Купить';
+          }, 1000);
+        });
+        grid.appendChild(node);
+      }
+    }
+
+    async function loadProducts() {
+      const limit = Math.min(200, Math.max(1, Number(limitInput.value || 24)));
+      const categoryId = categoryInput.value ? Number(categoryInput.value) : null;
+      const q = searchInput.value.trim().toLowerCase();
+
+      const params = new URLSearchParams({ limit: String(limit), offset: '0' });
+      if (categoryId && categoryId > 0) params.set('category_id', String(categoryId));
+
+      meta.textContent = 'Загружаем товары…';
+      refreshBtn.disabled = true;
+      refreshBtn.textContent = 'Загрузка...';
+
+      try {
+        const res = await fetch(`/api/products?${params.toString()}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        let data = await res.json();
+
+        if (q) {
+          data = data.filter((item) => {
+            const source = `${item.name} ${item.description || ''}`.toLowerCase();
+            return source.includes(q);
+          });
+        }
+
+        renderCards(data);
+        meta.textContent = `Показано товаров: ${data.length}`;
+      } catch (error) {
+        grid.innerHTML = '<p class="empty">Не удалось загрузить каталог. Попробуйте ещё раз.</p>';
+        meta.textContent = 'Ошибка загрузки каталога';
+      } finally {
+        refreshBtn.disabled = false;
+        refreshBtn.textContent = 'Обновить';
+      }
+    }
+
+    refreshBtn.addEventListener('click', loadProducts);
+    searchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') loadProducts();
+    });
+    categoryInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') loadProducts();
+    });
+
+    writeCart(readCart());
+    loadProducts();
+  </script>
+</body>
+</html>

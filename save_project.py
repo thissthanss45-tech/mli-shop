@@ -61,7 +61,7 @@ def save_full_project():
                     
                     print(f"✅ Добавлен: {rel_path}")
                 except Exception as e:
-                    print(f"❌ Ошибка чтения {rel_path}: {e}")
+                    print(f"⚠️ Ошибка чтения {rel_path}: {e}")
 
     print(f"\n🎉 Готово! Весь код сохранен в файл: {OUTPUT_FILE}")
 

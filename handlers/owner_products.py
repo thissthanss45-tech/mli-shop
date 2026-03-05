@@ -27,9 +27,42 @@ from .owner_keyboards import (
     build_brands_kb,
     owner_products_menu_kb,
 )
-from .owner_utils import ensure_owner, show_owner_main_menu
+from .owner_utils import ensure_owner, owner_only, show_owner_main_menu
 
 product_router = Router(name="owner_products")
+
+FORBIDDEN_ENTITY_NAMES = {
+    "✏️ Редактировать товар",
+    "🗑 Удалить товар",
+    "➕ Добавить товар",
+    "🗑 Удалить категорию",
+    "🗑 Удалить бренд",
+}
+
+
+def _normalize_text(text: str | None) -> str:
+    return (text or "").strip()
+
+
+def _is_cancel_or_back_text(text: str | None) -> bool:
+    value = _normalize_text(text)
+    return value in {
+        "⬅ Назад",
+        "🔙 Назад",
+        "↩️ Назад",
+        "🔙 Отмена",
+        "⛔ Отмена",
+        "↩️ Отмена",
+        "Отмена",
+    }
+
+
+async def _show_products_menu(message: Message) -> None:
+    kb = owner_products_menu_kb()
+    await message.answer(
+        "📦 Управление товарами:\n\nВыбери действие:",
+        reply_markup=kb,
+    )
 
 
 async def _maybe_show_staff_menu(message: Message, session: AsyncSession) -> bool:
@@ -58,16 +91,14 @@ def _is_staff_menu_text(text: str) -> bool:
 # ==========================================
 
 @product_router.message(F.text == "📦 Товары")
-async def owner_menu_products(message: Message, state: FSMContext, session: AsyncSession) -> None:
+@owner_only
+async def owner_menu_products(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession | None = None,
+) -> None:
     """Меню управления товарами."""
-    if not await ensure_owner(message, session):
-        return
-
-    kb = owner_products_menu_kb()
-    await message.answer(
-        "📦 Управление товарами:\n\nВыбери действие:",
-        reply_markup=kb,
-    )
+    await _show_products_menu(message)
 
 
 # ==========================================
@@ -75,11 +106,13 @@ async def owner_menu_products(message: Message, state: FSMContext, session: Asyn
 # ==========================================
 
 @product_router.message(F.text == "➕ Добавить категорию")
-async def owner_add_category_start(message: Message, state: FSMContext, session: AsyncSession) -> None:
+@owner_only
+async def owner_add_category_start(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession | None = None,
+) -> None:
     """Начало добавления категории."""
-    if not await ensure_owner(message, session):
-        return
-
     await state.set_state(AddCategoryBrandStates.enter_category_name)
     await message.answer(
         "Введи название категории (например: Одежда, Обувь):",
@@ -97,7 +130,7 @@ async def owner_add_category_name(
     name = (message.text or "").strip()
 
     # Обработка кнопок меню (если передумал)
-    if name == "⬅ Назад" or name == "❌ Отмена":
+    if _is_cancel_or_back_text(name):
         await state.clear()
         await owner_menu_products(message, state)
         return
@@ -113,9 +146,8 @@ async def owner_add_category_name(
         return
 
     # Защита от названий кнопок
-    forbidden_names = ["✏️ Редактировать товар", "❌ Удалить товар", "➕ Добавить товар", "🗑 Удалить категорию", "🗑 Удалить бренд"]
-    if name in forbidden_names:
-        await message.answer("❌ Нельзя называть категорию именем кнопки! Введи название текстом:")
+    if name in FORBIDDEN_ENTITY_NAMES:
+        await message.answer("⚠️ Нельзя называть категорию именем кнопки! Введи название текстом:")
         return
 
     if not name:
@@ -136,11 +168,13 @@ async def owner_add_category_name(
 # ==========================================
 
 @product_router.message(F.text == "➕ Добавить бренд")
-async def owner_add_brand_start(message: Message, state: FSMContext, session: AsyncSession) -> None:
+@owner_only
+async def owner_add_brand_start(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession | None = None,
+) -> None:
     """Начало добавления бренда."""
-    if not await ensure_owner(message, session):
-        return
-
     # Переводим бота в состояние ожидания ввода названия бренда
     await state.set_state(AddCategoryBrandStates.enter_brand_name)
     await message.answer(
@@ -159,7 +193,7 @@ async def owner_add_brand_name(
     name = (message.text or "").strip()
 
     # Обработка кнопок меню
-    if name == "⬅ Назад" or name == "❌ Отмена":
+    if _is_cancel_or_back_text(name):
         await state.clear()
         await owner_menu_products(message, state)
         return
@@ -175,9 +209,8 @@ async def owner_add_brand_name(
         return
 
     # Защита от названий кнопок
-    forbidden_names = ["✏️ Редактировать товар", "❌ Удалить товар", "➕ Добавить товар", "🗑 Удалить категорию", "🗑 Удалить бренд"]
-    if name in forbidden_names:
-        await message.answer("❌ Нельзя называть бренд именем кнопки! Введи название текстом:")
+    if name in FORBIDDEN_ENTITY_NAMES:
+        await message.answer("⚠️ Нельзя называть бренд именем кнопки! Введи название текстом:")
         return
 
     if not name:
@@ -198,15 +231,13 @@ async def owner_add_brand_name(
 # ==========================================
 
 @product_router.message(F.text == "➕ Добавить товар")
+@owner_only
 async def owner_add_product_start(
     message: Message,
     state: FSMContext,
     session: AsyncSession,
 ) -> None:
     """Начало добавления товара."""
-    if not await ensure_owner(message, session):
-        return
-
     repo = CatalogRepo(session)
     categories = await repo.list_categories()
 
@@ -259,15 +290,14 @@ async def owner_choose_brand(callback: CallbackQuery, state: FSMContext) -> None
 
 @product_router.message(AddProductStates.enter_name)
 async def owner_enter_name(message: Message, state: FSMContext) -> None:
-    name = message.text.strip()
-    if name == "⬅ Назад" or name == "❌ Отмена":
+    name = _normalize_text(message.text)
+    if _is_cancel_or_back_text(name):
         await state.clear()
         await owner_menu_products(message, state)
         return
 
-    forbidden_names = ["✏️ Редактировать товар", "❌ Удалить товар", "➕ Добавить товар", "🗑 Удалить категорию", "🗑 Удалить бренд"]
-    if name in forbidden_names:
-        await message.answer("❌ Нельзя называть товар именем кнопки! Введи название текстом:")
+    if name in FORBIDDEN_ENTITY_NAMES:
+        await message.answer("⚠️ Нельзя называть товар именем кнопки! Введи название текстом:")
         return
 
     if not name:
@@ -281,8 +311,13 @@ async def owner_enter_name(message: Message, state: FSMContext) -> None:
 
 @product_router.message(AddProductStates.enter_purchase_price)
 async def owner_enter_purchase_price(message: Message, state: FSMContext) -> None:
+    if _is_cancel_or_back_text(message.text):
+        await state.clear()
+        await owner_menu_products(message, state)
+        return
+
     try:
-        value = float(message.text.replace(" ", "").replace(",", "."))
+        value = float(_normalize_text(message.text).replace(" ", "").replace(",", "."))
         if value < 0: raise ValueError
     except ValueError:
         await message.answer("Некорректное число. Введи закупочную цену ещё раз:", reply_markup=cancel_kb())
@@ -295,8 +330,13 @@ async def owner_enter_purchase_price(message: Message, state: FSMContext) -> Non
 
 @product_router.message(AddProductStates.enter_sale_price)
 async def owner_enter_sale_price(message: Message, state: FSMContext) -> None:
+    if _is_cancel_or_back_text(message.text):
+        await state.clear()
+        await owner_menu_products(message, state)
+        return
+
     try:
-        value = float(message.text.replace(" ", "").replace(",", "."))
+        value = float(_normalize_text(message.text).replace(" ", "").replace(",", "."))
         if value < 0: raise ValueError
     except ValueError:
         await message.answer("Некорректное число. Введи продажную цену ещё раз:", reply_markup=cancel_kb())
@@ -473,9 +513,8 @@ async def create_product_in_db(message: Message, state: FSMContext, session: Asy
 # ==========================================
 
 @product_router.message(F.text == "✏️ Редактировать товар")
+@owner_only
 async def owner_edit_start(message: Message, state: FSMContext, session: AsyncSession):
-    if not await ensure_owner(message, session):
-        return
     repo = CatalogRepo(session)
     categories = await repo.list_categories()
     if not categories:
@@ -508,7 +547,7 @@ async def owner_edit_brand(callback: CallbackQuery, state: FSMContext, session: 
     kb = InlineKeyboardBuilder()
     for p in products:
         kb.button(text=p.title, callback_data=f"owner:edit_prod:{p.id}")
-    kb.button(text="❌ Отмена", callback_data="owner:cancel")
+    kb.button(text="↩️ Назад", callback_data="owner:cancel")
     kb.adjust(1)
     await state.set_state(EditProductStates.choose_product)
     await callback.message.edit_text("Выберите товар для редактирования:", reply_markup=kb.as_markup())
@@ -554,14 +593,11 @@ async def owner_show_edit_card(callback: CallbackQuery, state: FSMContext, sessi
     await state.set_state(EditProductStates.view_product)
     
     if product.photos:
-        if callback.message.photo:
-            try: await callback.message.edit_caption(caption=text, reply_markup=kb.as_markup(), parse_mode="HTML")
-            except: 
-                await callback.message.delete()
-                await callback.message.answer_photo(product.photos[0].file_id, caption=text, reply_markup=kb.as_markup(), parse_mode="HTML")
-        else:
+        try:
             await callback.message.delete()
-            await callback.message.answer_photo(product.photos[0].file_id, caption=text, reply_markup=kb.as_markup(), parse_mode="HTML")
+        except Exception:
+            pass
+        await callback.message.answer_photo(product.photos[0].file_id, caption=text, reply_markup=kb.as_markup(), parse_mode="HTML")
     else:
         if callback.message.photo:
             await callback.message.delete()
@@ -578,7 +614,7 @@ async def start_edit_price(callback: CallbackQuery, state: FSMContext):
 
 @product_router.message(EditProductStates.edit_price)
 async def process_edit_price(message: Message, state: FSMContext, session: AsyncSession):
-    text = message.text.strip()
+    text = _normalize_text(message.text)
 
     if _is_staff_menu_text(text):
         await state.clear()
@@ -586,9 +622,12 @@ async def process_edit_price(message: Message, state: FSMContext, session: Async
         return
 
     # 👇 ЗАЩИТА ОТ КНОПОК
-    if text in ["⬅ Назад", "❌ Отмена"]:
+    if _is_cancel_or_back_text(text):
+        await state.clear()
         await message.answer("Редактирование цены отменено.")
-        await owner_show_edit_card_manual(message, state, session)
+        if await _maybe_show_staff_menu(message, session):
+            return
+        await _show_products_menu(message)
         return
     # 👆
 
@@ -610,7 +649,7 @@ async def process_edit_price(message: Message, state: FSMContext, session: Async
             return
         await owner_show_edit_card_manual(message, state, session)
     except ValueError:
-        await message.answer("❌ Ошибка. Введите два числа через пробел или нажмите «❌ Отмена».")
+        await message.answer("⚠️ Ошибка. Введите два числа через пробел или нажмите «↩️ Назад».")
 
 @product_router.callback_query(F.data == "edit:action:desc")
 async def start_edit_desc(callback: CallbackQuery, state: FSMContext):
@@ -620,7 +659,7 @@ async def start_edit_desc(callback: CallbackQuery, state: FSMContext):
 
 @product_router.message(EditProductStates.edit_description)
 async def process_edit_desc(message: Message, state: FSMContext, session: AsyncSession):
-    desc = message.text.strip()
+    desc = _normalize_text(message.text)
 
     if _is_staff_menu_text(desc):
         await state.clear()
@@ -628,9 +667,12 @@ async def process_edit_desc(message: Message, state: FSMContext, session: AsyncS
         return
     
     # 👇 ДОБАВЛЕНА ПРОВЕРКА НА КНОПКИ ОТМЕНЫ
-    if desc in ["⬅ Назад", "❌ Отмена", "owner:cancel"]:
+    if _is_cancel_or_back_text(desc) or desc == "owner:cancel":
+        await state.clear()
         await message.answer("Редактирование описания отменено.")
-        await owner_show_edit_card_manual(message, state, session)
+        if await _maybe_show_staff_menu(message, session):
+            return
+        await _show_products_menu(message)
         return
     # 👆 КОНЕЦ ПРОВЕРКИ
 
@@ -686,7 +728,7 @@ async def back_to_card_from_stock(callback: CallbackQuery, state: FSMContext, se
 
 @product_router.message(EditProductStates.edit_stock_qty)
 async def process_stock_update(message: Message, state: FSMContext, session: AsyncSession):
-    text = message.text.strip()
+    text = _normalize_text(message.text)
 
     if _is_staff_menu_text(text):
         await state.clear()
@@ -694,9 +736,12 @@ async def process_stock_update(message: Message, state: FSMContext, session: Asy
         return
 
     # 👇 ЗАЩИТА ОТ КНОПОК
-    if text in ["⬅ Назад", "❌ Отмена"]:
+    if _is_cancel_or_back_text(text):
+        await state.clear()
         await message.answer("Редактирование остатков отменено.")
-        await owner_show_edit_card_manual(message, state, session)
+        if await _maybe_show_staff_menu(message, session):
+            return
+        await _show_products_menu(message)
         return
     # 👆
 
@@ -726,7 +771,7 @@ async def process_stock_update(message: Message, state: FSMContext, session: Asy
             
         await owner_show_edit_card_manual(message, state, session)
     except ValueError:
-        await message.answer("❌ Ошибка ввода. Проверьте формат или нажмите «❌ Отмена».")
+        await message.answer("⚠️ Ошибка ввода. Проверьте формат или нажмите «↩️ Назад».")
 
 @product_router.callback_query(F.data == "edit:action:photo")
 async def start_add_photo(callback: CallbackQuery, state: FSMContext):

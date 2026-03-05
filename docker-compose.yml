@@ -1,63 +1,124 @@
-version: '3.8'
-
 services:
   db:
     image: postgres:15-alpine
     restart: always
     environment:
-      POSTGRES_USER: shop_user
-      POSTGRES_PASSWORD: shop_password
-      POSTGRES_DB: shop_db
+      POSTGRES_USER: ${POSTGRES_USER:-shop_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-shop_password}
+      POSTGRES_DB: ${POSTGRES_DB:-shop_db}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shop_user -d shop_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   redis:
     image: redis:7-alpine
     restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
 
   rabbitmq:
     image: rabbitmq:3-management-alpine
     restart: always
-    ports:
-      - "5672:5672"
-      - "15672:15672"
+    expose:
+      - "5672"
+      - "15672"
     environment:
-      RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-mli_shop}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-changeme_rabbitmq}
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
 
   bot:
     build: .
     restart: always
     depends_on:
-      - db
-      - redis
-      - rabbitmq
-    volumes:
-      - .:/app
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     env_file:
-      - .env
+      - ${ENV_FILE:-.env}
     environment:
-      DB_URL: postgresql+asyncpg://shop_user:shop_password@db/shop_db
+      DB_URL: postgresql+asyncpg://${POSTGRES_USER:-shop_user}:${POSTGRES_PASSWORD:-shop_password}@db/${POSTGRES_DB:-shop_db}
       REDIS_URL: redis://redis:6379/0
-      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-mli_shop}:${RABBITMQ_PASS:-changeme_rabbitmq}@rabbitmq:5672/
     command: sh -c "alembic -c /app/alembic.ini upgrade head && python shop.py"
 
   worker:
     build: .
     restart: always
     depends_on:
-      - db
-      - redis
-      - rabbitmq
-    volumes:
-      - .:/app
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     env_file:
-      - .env
+      - ${ENV_FILE:-.env}
     environment:
-      DB_URL: postgresql+asyncpg://shop_user:shop_password@db/shop_db
+      DB_URL: postgresql+asyncpg://${POSTGRES_USER:-shop_user}:${POSTGRES_PASSWORD:-shop_password}@db/${POSTGRES_DB:-shop_db}
       REDIS_URL: redis://redis:6379/0
-      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-mli_shop}:${RABBITMQ_PASS:-changeme_rabbitmq}@rabbitmq:5672/
     command: python worker.py
+
+  web_api:
+    build: .
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    env_file:
+      - ${ENV_FILE:-.env}
+    environment:
+      DB_URL: postgresql+asyncpg://${POSTGRES_USER:-shop_user}:${POSTGRES_PASSWORD:-shop_password}@db/${POSTGRES_DB:-shop_db}
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-mli_shop}:${RABBITMQ_PASS:-changeme_rabbitmq}@rabbitmq:5672/
+    ports:
+      - "0.0.0.0:8000:8000"
+    command: sh -c "alembic -c /app/alembic.ini upgrade head && python web_api.py"
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: always
+    depends_on:
+      web_api:
+        condition: service_started
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      TLS_DOMAIN: ${TLS_DOMAIN}
+    volumes:
+      - ./infra/nginx/templates:/etc/nginx/templates:ro
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+
+  certbot:
+    image: certbot/certbot:latest
+    profiles: ["ops"]
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
 
 volumes:
   postgres_data:

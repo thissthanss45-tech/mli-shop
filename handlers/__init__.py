@@ -4,6 +4,7 @@ from .owner_main import main_router
 from .ai import ai_router
 from .admin import admin_router
 from .owner_warehouse import warehouse_router
+from .admin_orders import admin_orders_router
 
 __all__ = [
     "client_router",
@@ -11,5 +12,6 @@ __all__ = [
     "main_router",
     "ai_router",
     "admin_router",
-    "warehouse_router"
+    "warehouse_router",
+    "admin_orders_router",
 ]

@@ -27,9 +27,11 @@ async def send_product_card(
 
     available_sizes = [f"{s.size}" for s in product.stock if s.quantity > 0]
     sizes_str = ", ".join(available_sizes) if available_sizes else "Нет в наличии"
+    brand_name = product.brand.name if product.brand else "Без бренда"
 
     text = (
         f"🏷 {product.title}\n\n"
+        f"🏷️ Бренд: {brand_name}\n"
         f"💰 Цена: {product.sale_price} ₽\n"
         f"📏 Размеры в наличии: {sizes_str}\n"
     )

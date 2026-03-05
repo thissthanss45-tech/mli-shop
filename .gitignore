@@ -19,3 +19,5 @@ dump_project.py
 save_project.py
 *.log
 shop_db_backup.sql
+*.db
+.env.flowers

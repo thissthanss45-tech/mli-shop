@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from models import Category, Brand, Product, Photo, ProductStock
+from models import MovementDirection, MovementOperation
+from database.stock_movement_repo import StockMovementRepo
 
 
 def _normalize_sku_prefix(brand_name: str) -> str:
@@ -198,7 +200,8 @@ class CatalogRepo:
             .options(
                 selectinload(Product.stock),
                 selectinload(Product.category),
-                selectinload(Product.brand)
+                selectinload(Product.brand),
+                selectinload(Product.photos)
             )
             .order_by(Product.id.desc())
         )
@@ -264,6 +267,21 @@ class CatalogRepo:
         )
         self.session.add(stock)
         await self.session.flush()
+
+        if quantity > 0:
+            movement_repo = StockMovementRepo(self.session)
+            await movement_repo.add_movement(
+                product_id=product.id,
+                size=size,
+                quantity=quantity,
+                stock_before=0,
+                stock_after=quantity,
+                direction=MovementDirection.IN,
+                operation_type=MovementOperation.MANUAL_ADD,
+                unit_purchase_price=float(product.purchase_price),
+                unit_sale_price=float(product.sale_price),
+                note="Initial stock add",
+            )
         return stock
 
     # ===== UPDATE METHODS (Редактирование) =====
@@ -293,6 +311,23 @@ class CatalogRepo:
         await self.session.flush()
         return True
 
+    async def update_product_brand(self, product_id: int, brand_name: str) -> bool:
+        stmt = select(Product).where(Product.id == product_id)
+        res = await self.session.execute(stmt)
+        product = res.scalar_one_or_none()
+
+        if not product:
+            return False
+
+        normalized_brand_name = (brand_name or "").strip()
+        if not normalized_brand_name:
+            return False
+
+        brand = await self.get_or_create_brand(normalized_brand_name)
+        product.brand = brand
+        await self.session.flush()
+        return True
+
     async def update_stock_quantity(self, product_id: int, size: str, new_quantity: int) -> bool:
         """Обновляет остаток конкретного размера."""
         stmt = select(ProductStock).where(
@@ -309,12 +344,31 @@ class CatalogRepo:
         if not product:
             return False
 
+        old_quantity = stock.quantity if stock else 0
         if stock:
             stock.quantity = new_quantity
         else:
             if new_quantity > 0:
                 new_stock = ProductStock(product_id=product.id, size=size, quantity=new_quantity)
                 self.session.add(new_stock)
+
+        delta = new_quantity - old_quantity
+        if delta != 0:
+            movement_repo = StockMovementRepo(self.session)
+            direction = MovementDirection.IN if delta > 0 else MovementDirection.OUT
+            operation_type = MovementOperation.MANUAL_ADD if delta > 0 else MovementOperation.MANUAL_WRITE_OFF
+            await movement_repo.add_movement(
+                product_id=product.id,
+                size=size,
+                quantity=abs(delta),
+                stock_before=old_quantity,
+                stock_after=new_quantity,
+                direction=direction,
+                operation_type=operation_type,
+                unit_purchase_price=float(product.purchase_price),
+                unit_sale_price=float(product.sale_price),
+                note="Manual stock update from warehouse UI (correction/write-off)",
+            )
         
         await self.session.flush()
         return True
@@ -489,9 +543,9 @@ class CatalogRepo:
         elif sort_by == "margin":
             order_clause = (Product.sale_price - Product.purchase_price).desc()
         elif sort_by == "stock":
-            # Сортировка по общему остатку (сложнее, нужен join)
+            # Сортировка по общему остатку
             stmt = (
-                select(Product, func.coalesce(func.sum(ProductStock.quantity), 0).label("total_stock"))
+                select(Product)
                 .options(selectinload(Product.stock), selectinload(Product.category), selectinload(Product.brand))
                 .join(ProductStock, isouter=True)
                 .where(
@@ -502,8 +556,7 @@ class CatalogRepo:
                 .order_by(func.coalesce(func.sum(ProductStock.quantity), 0).desc())
             )
             res = await self.session.execute(stmt)
-            # Возвращаем только продукты
-            return [row[0] for row in res.all()]
+            return res.scalars().all()
         else:
             order_clause = Product.title
 
@@ -520,152 +573,3 @@ class CatalogRepo:
             res = await self.session.execute(stmt)
             return res.scalars().all()
         return []
-
-
-        # ===== АНАЛИТИКА И ФИЛЬТРЫ (НОВЫЕ МЕТОДЫ ДЛЯ СКЛАДА) =====
-
-    async def get_category_stats(self, category_id: int) -> dict:
-        """Получает статистику по категории: кол-во товаров, остатки, деньги."""
-        stmt = (
-            select(Product)
-            .options(selectinload(Product.stock))
-            .where(Product.category_id == category_id)
-        )
-        res = await self.session.execute(stmt)
-        products = res.scalars().all()
-        
-        product_count = len(products)
-        total_items = sum(sum(s.quantity for s in p.stock) for p in products)
-        total_purchase = sum(float(p.purchase_price) * sum(s.quantity for s in p.stock) for p in products)
-        total_sale = sum(float(p.sale_price) * sum(s.quantity for s in p.stock) for p in products)
-        
-        return {
-            "product_count": product_count,
-            "total_items": total_items,
-            "total_purchase": total_purchase,
-            "total_sale": total_sale,
-        }
-
-    async def get_brand_stats(self, brand_id: int, category_id: int | None = None) -> dict:
-        """Статистика по бренду (в категории, если указана)."""
-        conditions = [Product.brand_id == brand_id]
-        if category_id:
-            conditions.append(Product.category_id == category_id)
-            
-        stmt = (
-            select(Product)
-            .options(selectinload(Product.stock))
-            .where(and_(*conditions))
-        )
-        res = await self.session.execute(stmt)
-        products = res.scalars().all()
-        
-        product_count = len(products)
-        total_items = sum(sum(s.quantity for s in p.stock) for p in products)
-        total_investment = sum(float(p.purchase_price) * sum(s.quantity for s in p.stock) for p in products)
-        
-        return {
-            "product_count": product_count,
-            "total_items": total_items,
-            "total_investment": total_investment,
-        }
-
-    async def get_critical_stock_products(self, limit: int = 20) -> Sequence[Product]:
-        """Товары с остатком ≤ 5 шт."""
-        stmt = (
-            select(Product)
-            .options(selectinload(Product.stock), selectinload(Product.category), selectinload(Product.brand))
-            .join(ProductStock)
-            .group_by(Product.id)
-            .having(func.sum(ProductStock.quantity) <= 5)
-            .order_by(func.sum(ProductStock.quantity))
-            .limit(limit)
-        )
-        res = await self.session.execute(stmt)
-        return res.scalars().all()
-
-    async def get_top_margin_products(self, limit: int = 20) -> Sequence[Product]:
-        """Товары с наибольшей маржой (продажа - закупка)."""
-        stmt = (
-            select(Product)
-            .options(selectinload(Product.stock), selectinload(Product.category), selectinload(Product.brand))
-            .order_by((Product.sale_price - Product.purchase_price).desc())
-            .limit(limit)
-        )
-        res = await self.session.execute(stmt)
-        return res.scalars().all()
-
-    async def get_zero_stock_products(self, limit: int = 20) -> Sequence[Product]:
-        """Товары без остатков."""
-        # Используем подзапрос для товаров, у которых нет записей в stock или сумма quantity = 0
-        subq = (
-            select(Product.id)
-            .join(ProductStock, isouter=True)
-            .group_by(Product.id)
-            .having(func.coalesce(func.sum(ProductStock.quantity), 0) == 0)
-        ).alias("zero_products")
-        
-        stmt = (
-            select(Product)
-            .options(selectinload(Product.stock), selectinload(Product.category), selectinload(Product.brand))
-            .where(Product.id.in_(select(subq.c.id)))
-            .order_by(Product.id.desc())
-            .limit(limit)
-        )
-        res = await self.session.execute(stmt)
-        return res.scalars().all()
-
-    async def get_new_products(self, days: int = 7, limit: int = 20) -> Sequence[Product]:
-        """Товары, добавленные за последние N дней."""
-        cutoff_date = datetime.utcnow() - timedelta(days=days)
-        stmt = (
-            select(Product)
-            .options(selectinload(Product.stock), selectinload(Product.category), selectinload(Product.brand))
-            .where(Product.created_at >= cutoff_date)
-            .order_by(Product.created_at.desc())
-            .limit(limit)
-        )
-        res = await self.session.execute(stmt)
-        return res.scalars().all()
-
-    async def get_products_sorted(self, category_id: int, brand_id: int, sort_by: str = "name") -> Sequence[Product]:
-        """Товары с сортировкой."""
-        order_clause = None
-        if sort_by == "name":
-            order_clause = Product.title
-        elif sort_by == "price":
-            order_clause = Product.sale_price
-        elif sort_by == "margin":
-            order_clause = (Product.sale_price - Product.purchase_price).desc()
-        elif sort_by == "stock":
-            # Сортировка по общему остатку (сложнее, нужен join)
-            stmt = (
-                select(Product, func.coalesce(func.sum(ProductStock.quantity), 0).label("total_stock"))
-                .options(selectinload(Product.stock), selectinload(Product.category), selectinload(Product.brand))
-                .join(ProductStock, isouter=True)
-                .where(
-                    Product.category_id == category_id,
-                    Product.brand_id == brand_id,
-                )
-                .group_by(Product.id)
-                .order_by(func.coalesce(func.sum(ProductStock.quantity), 0).desc())
-            )
-            res = await self.session.execute(stmt)
-            # Возвращаем только продукты
-            return [row[0] for row in res.all()]
-        else:
-            order_clause = Product.title
-
-        if order_clause is not None:
-            stmt = (
-                select(Product)
-                .options(selectinload(Product.stock), selectinload(Product.category), selectinload(Product.brand))
-                .where(
-                    Product.category_id == category_id,
-                    Product.brand_id == brand_id,
-                )
-                .order_by(order_clause)
-            )
-            res = await self.session.execute(stmt)
-            return res.scalars().all()
-        return []    

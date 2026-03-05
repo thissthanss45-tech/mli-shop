@@ -51,6 +51,7 @@ class EditProductStates(StatesGroup):
     
     # Редактирование полей
     edit_price = State()
+    edit_brand = State()
     edit_description = State()
     
     # Редактирование склада
@@ -69,3 +70,14 @@ class SupportReplyStates(StatesGroup):
 class OrderHistoryStates(StatesGroup):
     """Состояния для истории заказов владельца."""
     waiting_for_date = State()
+
+
+class AdminOrderReplyStates(StatesGroup):
+    """Состояния для ответа клиенту из карточки заказа."""
+    waiting_for_message_to_client = State()
+
+
+class WarehouseYearStates(StatesGroup):
+    """Состояния ручного ввода года в разделе склада."""
+    waiting_for_procurement_year = State()
+    waiting_for_report_year = State()

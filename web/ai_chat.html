@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MLI Shop — AI чат</title>
+  <link rel="stylesheet" href="/web/styles.css" />
+</head>
+<body>
+  <div class="bg-glow bg-glow--1"></div>
+  <div class="bg-glow bg-glow--2"></div>
+
+  <header class="header">
+    <div class="container header__inner">
+      <div>
+        <p class="badge">MLI SHOP</p>
+        <h1>AI-консультант</h1>
+        <p class="subtitle">Задайте вопрос по товарам, подбору и заказу</p>
+      </div>
+      <div class="header-actions">
+        <a class="docs-link" href="/admin">🛠 Админ</a>
+        <a class="docs-link" href="/about">🏬 О магазине</a>
+        <a class="docs-link" href="/">← В каталог</a>
+        <a class="cart-pill" href="/cart">🛒 Корзина: <b id="cart-count">0</b></a>
+      </div>
+    </div>
+  </header>
+
+  <main class="container ai-chat-wrap">
+    <section class="card ai-chat-box" id="ai-chat-box">
+      <div class="ai-chat-log" id="ai-chat-log"></div>
+      <div class="ai-chat-form">
+        <textarea id="ai-input" rows="3" placeholder="Например: подбери удобные брюки на каждый день"></textarea>
+        <button class="card__buy" id="ai-send" type="button">Отправить</button>
+      </div>
+    </section>
+
+    <section class="card ai-mini-cart" id="ai-mini-cart">
+      <div class="ai-mini-cart__head">
+        <h3 class="card__title">Мини-корзина</h3>
+        <a class="card__more card__more--ghost" href="/cart">Перейти к оформлению</a>
+      </div>
+      <div id="ai-mini-cart-list" class="ai-mini-cart__list"></div>
+    </section>
+  </main>
+
+  <script>
+    const chatLog = document.getElementById('ai-chat-log');
+    const input = document.getElementById('ai-input');
+    const sendBtn = document.getElementById('ai-send');
+    const cartCount = document.getElementById('cart-count');
+    const miniCartList = document.getElementById('ai-mini-cart-list');
+    const storageKey = 'mli_ai_history';
+    const cartKey = 'mli_cart';
+
+    function readCart() {
+      try {
+        return JSON.parse(localStorage.getItem(cartKey) || '[]');
+      } catch {
+        return [];
+      }
+    }
+
+    function writeCart(items) {
+      localStorage.setItem(cartKey, JSON.stringify(items));
+      cartCount.textContent = String(items.length);
+    }
+
+    function updateCartCount() {
+      cartCount.textContent = String(readCart().length);
+      renderMiniCart();
+    }
+
+    function renderMiniCart() {
+      const cart = readCart();
+      miniCartList.innerHTML = '';
+      if (!cart.length) {
+        miniCartList.innerHTML = '<p class="empty">Корзина пуста. Добавьте товары через кнопки AI.</p>';
+        return;
+      }
+
+      cart.slice(-5).forEach((item) => {
+        const row = document.createElement('div');
+        row.className = 'ai-mini-cart__item';
+        row.innerHTML = `
+          <span>${item.name}</span>
+          <b>${new Intl.NumberFormat('ru-RU').format(item.price)} ₽</b>
+        `;
+        miniCartList.appendChild(row);
+      });
+    }
+
+    function readHistory() {
+      try {
+        return JSON.parse(localStorage.getItem(storageKey) || '[]');
+      } catch {
+        return [];
+      }
+    }
+
+    function writeHistory(history) {
+      localStorage.setItem(storageKey, JSON.stringify(history.slice(-20)));
+    }
+
+    function extractProductIds(text) {
+      const ids = new Set();
+      const regex = /\bID\s*([0-9]{1,9})\b/gi;
+      let match;
+      while ((match = regex.exec(text || '')) !== null) {
+        ids.add(Number(match[1]));
+      }
+      return Array.from(ids).slice(0, 6);
+    }
+
+    async function addProductToCartById(productId, button) {
+      button.disabled = true;
+      button.textContent = 'Добавляем...';
+      try {
+        const res = await fetch(`/api/products/${productId}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const item = await res.json();
+
+        const cart = readCart();
+        if (!cart.find((x) => x.id === item.id)) {
+          cart.push({
+            id: item.id,
+            name: item.name,
+            description: item.description,
+            price: item.price,
+            category_id: item.category_id,
+            category_name: item.category_name,
+            brand_id: item.brand_id,
+            brand_name: item.brand_name,
+            image_url: item.image_url,
+          });
+          writeCart(cart);
+        } else {
+          updateCartCount();
+        }
+
+        button.textContent = 'Добавлено ✓';
+      } catch (error) {
+        button.textContent = 'Ошибка';
+      } finally {
+        setTimeout(() => {
+          button.disabled = false;
+          button.textContent = `Добавить ID ${productId}`;
+        }, 1200);
+      }
+    }
+
+    function addBubble(role, text) {
+      const bubble = document.createElement('div');
+      bubble.className = `ai-msg ai-msg--${role}`;
+      bubble.textContent = text;
+      chatLog.appendChild(bubble);
+
+      if (role === 'assistant') {
+        const ids = extractProductIds(text);
+        if (ids.length) {
+          const wrap = document.createElement('div');
+          wrap.className = 'ai-suggest-list';
+          ids.forEach((id) => {
+            const button = document.createElement('button');
+            button.className = 'ai-add-btn';
+            button.type = 'button';
+            button.textContent = `Добавить ID ${id}`;
+            button.addEventListener('click', () => addProductToCartById(id, button));
+            wrap.appendChild(button);
+          });
+          chatLog.appendChild(wrap);
+        }
+      }
+
+      chatLog.scrollTop = chatLog.scrollHeight;
+    }
+
+    function renderHistory() {
+      chatLog.innerHTML = '';
+      const history = readHistory();
+      if (!history.length) {
+        addBubble('assistant', 'Привет! Я AI-консультант магазина. Помогу подобрать товар и ответить на вопросы.');
+        return;
+      }
+      history.forEach((msg) => addBubble(msg.role, msg.content));
+    }
+
+    async function sendMessage() {
+      const text = input.value.trim();
+      if (!text) return;
+
+      const history = readHistory();
+      history.push({ role: 'user', content: text });
+      writeHistory(history);
+      addBubble('user', text);
+      input.value = '';
+
+      sendBtn.disabled = true;
+      sendBtn.textContent = 'Думаю...';
+
+      try {
+        const res = await fetch('/api/ai/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: text, history }),
+        });
+
+        if (!res.ok) {
+          const payload = await res.json().catch(() => ({}));
+          throw new Error(payload.detail || `HTTP ${res.status}`);
+        }
+
+        const payload = await res.json();
+        const answer = payload.answer || 'Пока не могу ответить.';
+        const updated = readHistory();
+        updated.push({ role: 'assistant', content: answer });
+        writeHistory(updated);
+        addBubble('assistant', answer);
+      } catch (error) {
+        addBubble('assistant', `Ошибка: ${error.message}`);
+      } finally {
+        sendBtn.disabled = false;
+        sendBtn.textContent = 'Отправить';
+      }
+    }
+
+    sendBtn.addEventListener('click', sendMessage);
+    input.addEventListener('keydown', (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+        sendMessage();
+      }
+    });
+
+    updateCartCount();
+    renderHistory();
+  </script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+services:
+  bot:
+    volumes:
+      - .:/app
+
+  worker:
+    volumes:
+      - .:/app
+
+  web_api:
+    volumes:
+      - .:/app

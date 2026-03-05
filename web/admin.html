@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MLI Shop — Админ панель</title>
+  <link rel="stylesheet" href="/web/styles.css" />
+</head>
+<body>
+  <div class="bg-glow bg-glow--1"></div>
+  <div class="bg-glow bg-glow--2"></div>
+
+  <header class="header">
+    <div class="container header__inner">
+      <div>
+        <p class="badge">MLI SHOP ADMIN</p>
+        <h1>Добавление товара с сайта</h1>
+        <p class="subtitle">Создавайте категории, бренды и товары прямо из web-панели</p>
+      </div>
+      <div class="header-actions">
+        <a class="docs-link" href="/about">🏬 О магазине</a>
+        <a class="docs-link" href="/">← В каталог</a>
+      </div>
+    </div>
+  </header>
+
+  <main class="container admin-wrap">
+    <section class="card admin-form-card">
+      <div class="checkout-grid">
+        <div class="control">
+          <label for="admin-key">Ключ администратора</label>
+          <input id="admin-key" type="password" placeholder="Введите WEB_ADMIN_KEY" />
+        </div>
+        <div class="control">
+          <label for="title">Название товара</label>
+          <input id="title" type="text" placeholder="Например: Брюки премиум" />
+        </div>
+      </div>
+
+      <div class="control">
+        <label for="description">Описание</label>
+        <input id="description" type="text" placeholder="Краткое описание" />
+      </div>
+
+      <div class="checkout-grid">
+        <div class="control">
+          <label for="category-name">Категория</label>
+          <input id="category-name" list="categories-list" type="text" placeholder="Например: Men" />
+          <datalist id="categories-list"></datalist>
+        </div>
+        <div class="control">
+          <label for="brand-name">Бренд</label>
+          <input id="brand-name" list="brands-list" type="text" placeholder="Например: Zilli" />
+          <datalist id="brands-list"></datalist>
+        </div>
+      </div>
+
+      <div class="checkout-grid">
+        <div class="control">
+          <label for="purchase-price">Закупочная цена</label>
+          <input id="purchase-price" type="number" min="0" step="0.01" placeholder="10000" />
+        </div>
+        <div class="control">
+          <label for="sale-price">Продажная цена</label>
+          <input id="sale-price" type="number" min="0" step="0.01" placeholder="15000" />
+        </div>
+      </div>
+
+      <div class="checkout-grid">
+        <div class="control">
+          <label for="size">Размер</label>
+          <input id="size" type="text" placeholder="M" />
+        </div>
+        <div class="control">
+          <label for="quantity">Количество</label>
+          <input id="quantity" type="number" min="0" step="1" placeholder="5" />
+        </div>
+      </div>
+
+      <div class="control">
+        <label for="photo-file-id">Photo file_id (опционально, Telegram)</label>
+        <input id="photo-file-id" type="text" placeholder="AgACAgIAAxkBA..." />
+      </div>
+
+      <div class="admin-actions">
+        <button class="btn" id="load-meta" type="button">Загрузить категории/бренды</button>
+        <button class="card__buy" id="create-product" type="button">Добавить товар</button>
+      </div>
+      <p class="meta" id="admin-status">Введите ключ администратора и заполните форму.</p>
+    </section>
+
+    <section class="card admin-form-card">
+      <h3 class="card__title">Отчёт за период (Excel)</h3>
+      <div class="checkout-grid">
+        <div class="control">
+          <label for="date-from">Дата с</label>
+          <input id="date-from" type="date" />
+        </div>
+        <div class="control">
+          <label for="date-to">Дата по</label>
+          <input id="date-to" type="date" />
+        </div>
+      </div>
+      <div class="admin-actions">
+        <button class="btn" id="download-report" type="button">Скачать Excel: приход / продажи</button>
+      </div>
+      <p class="meta">Файл содержит листы продаж, склада и движения с колонками прихода и расхода.</p>
+      <p class="meta" id="report-status">Выберите период и нажмите «Скачать Excel».</p>
+      <p class="meta">
+        <a class="docs-link" id="last-report-link" href="#" target="_blank" rel="noopener" style="display:none">Открыть последний отчёт</a>
+      </p>
+    </section>
+
+    <section class="card admin-form-card">
+      <div class="admin-table-head">
+        <h3 class="card__title">Товары (редактирование / удаление)</h3>
+        <button class="btn" id="reload-products" type="button">Обновить таблицу</button>
+      </div>
+      <div class="admin-table-wrap">
+        <table class="admin-table" id="products-table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>SKU</th>
+              <th>Название</th>
+              <th>Категория</th>
+              <th>Бренд</th>
+              <th>Закупка</th>
+              <th>Продажа</th>
+              <th>Размер</th>
+              <th>Остаток</th>
+              <th>Действия</th>
+            </tr>
+          </thead>
+          <tbody id="products-tbody"></tbody>
+        </table>
+      </div>
+      <p class="meta" id="products-meta">Загрузите таблицу товаров.</p>
+    </section>
+  </main>
+
+  <script>
+    const adminKey = document.getElementById('admin-key');
+    const titleInput = document.getElementById('title');
+    const descriptionInput = document.getElementById('description');
+    const categoryNameInput = document.getElementById('category-name');
+    const brandNameInput = document.getElementById('brand-name');
+    const purchasePriceInput = document.getElementById('purchase-price');
+    const salePriceInput = document.getElementById('sale-price');
+    const sizeInput = document.getElementById('size');
+    const quantityInput = document.getElementById('quantity');
+    const photoFileIdInput = document.getElementById('photo-file-id');
+    const categoriesList = document.getElementById('categories-list');
+    const brandsList = document.getElementById('brands-list');
+    const statusEl = document.getElementById('admin-status');
+    const loadMetaBtn = document.getElementById('load-meta');
+    const createBtn = document.getElementById('create-product');
+    const dateFromInput = document.getElementById('date-from');
+    const dateToInput = document.getElementById('date-to');
+    const downloadReportBtn = document.getElementById('download-report');
+    const reportStatus = document.getElementById('report-status');
+    const lastReportLink = document.getElementById('last-report-link');
+    const reloadProductsBtn = document.getElementById('reload-products');
+    const productsTbody = document.getElementById('products-tbody');
+    const productsMeta = document.getElementById('products-meta');
+
+    function toDateInputValue(date) {
+      const y = date.getFullYear();
+      const m = String(date.getMonth() + 1).padStart(2, '0');
+      const d = String(date.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+
+    function esc(value) {
+      return String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
+    }
+
+    function setStatus(text, isError = false) {
+      statusEl.textContent = text;
+      statusEl.style.color = isError ? '#fda4af' : '';
+    }
+
+    function setReportStatus(text, isError = false) {
+      reportStatus.textContent = text;
+      reportStatus.style.color = isError ? '#fda4af' : '';
+    }
+
+    function requireKey() {
+      const key = adminKey.value.trim();
+      if (!key) {
+        setStatus('Укажите ключ администратора.', true);
+        adminKey.focus();
+        return null;
+      }
+      return key;
+    }
+
+    function authHeaders(key, extra = {}) {
+      return {
+        ...extra,
+        Authorization: `Bearer ${key}`,
+      };
+    }
+
+    async function loadMeta() {
+      const key = requireKey();
+      if (!key) return;
+
+      loadMetaBtn.disabled = true;
+      setStatus('Загружаем справочники...');
+
+      try {
+        const res = await fetch('/api/admin/meta', {
+          headers: authHeaders(key),
+        });
+        if (!res.ok) {
+          const payload = await res.json().catch(() => ({}));
+          throw new Error(payload.detail || `HTTP ${res.status}`);
+        }
+
+        const data = await res.json();
+        categoriesList.innerHTML = '';
+        brandsList.innerHTML = '';
+
+        (data.categories || []).forEach((item) => {
+          const option = document.createElement('option');
+          option.value = item.name;
+          categoriesList.appendChild(option);
+        });
+
+        (data.brands || []).forEach((item) => {
+          const option = document.createElement('option');
+          option.value = item.name;
+          brandsList.appendChild(option);
+        });
+
+        setStatus(`Справочники загружены: категорий ${data.categories.length}, брендов ${data.brands.length}.`);
+      } catch (error) {
+        setStatus(`Ошибка загрузки: ${error.message}`, true);
+      } finally {
+        loadMetaBtn.disabled = false;
+      }
+    }
+
+    async function createProduct() {
+      const key = requireKey();
+      if (!key) return;
+
+      const payload = {
+        title: titleInput.value.trim(),
+        description: descriptionInput.value.trim() || null,
+        category_name: categoryNameInput.value.trim(),
+        brand_name: brandNameInput.value.trim(),
+        purchase_price: Number(purchasePriceInput.value || 0),
+        sale_price: Number(salePriceInput.value || 0),
+        size: sizeInput.value.trim(),
+        quantity: Number(quantityInput.value || 0),
+        photo_file_id: photoFileIdInput.value.trim() || null,
+      };
+
+      if (!payload.title || !payload.category_name || !payload.brand_name || !payload.size) {
+        setStatus('Заполните обязательные поля: название, категория, бренд, размер.', true);
+        return;
+      }
+
+      createBtn.disabled = true;
+      setStatus('Создаём товар...');
+
+      try {
+        const res = await fetch('/api/admin/products', {
+          method: 'POST',
+          headers: authHeaders(key, { 'Content-Type': 'application/json' }),
+          body: JSON.stringify(payload),
+        });
+
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.detail || `HTTP ${res.status}`);
+        }
+
+        const result = await res.json();
+        setStatus(`Товар добавлен: ID ${result.product_id}, SKU ${result.sku}`);
+        await loadProducts();
+      } catch (error) {
+        setStatus(`Ошибка создания: ${error.message}`, true);
+      } finally {
+        createBtn.disabled = false;
+      }
+    }
+
+    async function loadProducts() {
+      const key = requireKey();
+      if (!key) return;
+
+      reloadProductsBtn.disabled = true;
+      productsMeta.textContent = 'Загружаем товары...';
+      productsTbody.innerHTML = '';
+
+      try {
+        const res = await fetch('/api/admin/products?limit=200&offset=0', {
+          headers: authHeaders(key),
+        });
+        if (!res.ok) {
+          const payload = await res.json().catch(() => ({}));
+          throw new Error(payload.detail || `HTTP ${res.status}`);
+        }
+
+        const data = await res.json();
+        const items = data.items || [];
+        if (!items.length) {
+          productsMeta.textContent = 'Товары не найдены.';
+          return;
+        }
+
+        for (const item of items) {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>${item.id}</td>
+            <td>${esc(item.sku)}</td>
+            <td><input data-f="title" value="${esc(item.title)}"></td>
+            <td><input data-f="category_name" value="${esc(item.category_name)}"></td>
+            <td><input data-f="brand_name" value="${esc(item.brand_name)}"></td>
+            <td><input data-f="purchase_price" type="number" min="0" step="0.01" value="${item.purchase_price}"></td>
+            <td><input data-f="sale_price" type="number" min="0" step="0.01" value="${item.sale_price}"></td>
+            <td><input data-f="size" value="M"></td>
+            <td><input data-f="quantity" type="number" min="0" step="1" value="${item.total_stock}"></td>
+            <td>
+              <div class="admin-row-actions">
+                <button class="card__buy" data-act="save" type="button">Сохранить</button>
+                <button class="card__more card__more--ghost" data-act="delete" type="button">Удалить</button>
+              </div>
+            </td>
+          `;
+
+          tr.querySelector('[data-act="save"]').addEventListener('click', async () => {
+            const payload = {
+              title: tr.querySelector('[data-f="title"]').value.trim(),
+              category_name: tr.querySelector('[data-f="category_name"]').value.trim(),
+              brand_name: tr.querySelector('[data-f="brand_name"]').value.trim(),
+              purchase_price: Number(tr.querySelector('[data-f="purchase_price"]').value || 0),
+              sale_price: Number(tr.querySelector('[data-f="sale_price"]').value || 0),
+              size: tr.querySelector('[data-f="size"]').value.trim(),
+              quantity: Number(tr.querySelector('[data-f="quantity"]').value || 0),
+            };
+
+            try {
+              const saveRes = await fetch(`/api/admin/products/${item.id}`, {
+                method: 'PATCH',
+                headers: authHeaders(key, { 'Content-Type': 'application/json' }),
+                body: JSON.stringify(payload),
+              });
+              if (!saveRes.ok) {
+                const err = await saveRes.json().catch(() => ({}));
+                throw new Error(err.detail || `HTTP ${saveRes.status}`);
+              }
+              productsMeta.textContent = `Товар ${item.id} обновлён.`;
+            } catch (error) {
+              productsMeta.textContent = `Ошибка обновления ${item.id}: ${error.message}`;
+            }
+          });
+
+          tr.querySelector('[data-act="delete"]').addEventListener('click', async () => {
+            if (!confirm(`Удалить товар #${item.id}?`)) return;
+            try {
+              const delRes = await fetch(`/api/admin/products/${item.id}`, {
+                method: 'DELETE',
+                headers: authHeaders(key),
+              });
+              if (!delRes.ok) {
+                const err = await delRes.json().catch(() => ({}));
+                throw new Error(err.detail || `HTTP ${delRes.status}`);
+              }
+              tr.remove();
+              productsMeta.textContent = `Товар ${item.id} удалён.`;
+            } catch (error) {
+              productsMeta.textContent = `Ошибка удаления ${item.id}: ${error.message}`;
+            }
+          });
+
+          productsTbody.appendChild(tr);
+        }
+
+        productsMeta.textContent = `Загружено товаров: ${items.length} из ${data.total}.`;
+      } catch (error) {
+        productsMeta.textContent = `Ошибка загрузки таблицы: ${error.message}`;
+      } finally {
+        reloadProductsBtn.disabled = false;
+      }
+    }
+
+    async function downloadReport() {
+      const key = requireKey();
+      if (!key) return;
+
+      const dateFrom = dateFromInput.value;
+      const dateTo = dateToInput.value;
+      if (!dateFrom || !dateTo) {
+        setReportStatus('Выберите даты для отчёта.', true);
+        return;
+      }
+
+      downloadReportBtn.disabled = true;
+      setReportStatus('Формируем отчёт...');
+      lastReportLink.style.display = 'none';
+
+      const url = `/api/admin/reports/period.xlsx?date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`;
+      try {
+        const res = await fetch(url, {
+          headers: authHeaders(key),
+        });
+        if (!res.ok) {
+          const payload = await res.json().catch(() => ({}));
+          throw new Error(payload.detail || `HTTP ${res.status}`);
+        }
+
+        const disposition = res.headers.get('Content-Disposition') || '';
+        const match = disposition.match(/filename="?([^";]+)"?/i);
+        const filename = match?.[1] || `erp_report_${dateFrom}_${dateTo}.xlsx`;
+        const blob = await res.blob();
+
+        const downloadUrl = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = downloadUrl;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(downloadUrl);
+
+        const sizeKb = Math.max(1, Math.round(blob.size / 1024));
+        setReportStatus(`Отчёт готов: ${filename} (${sizeKb} KB). Для повторной загрузки нажмите кнопку снова.`);
+      } catch (error) {
+        setReportStatus(`Ошибка выгрузки отчёта: ${error.message}`, true);
+      } finally {
+        downloadReportBtn.disabled = false;
+      }
+    }
+
+    loadMetaBtn.addEventListener('click', loadMeta);
+    createBtn.addEventListener('click', createProduct);
+    reloadProductsBtn.addEventListener('click', loadProducts);
+    downloadReportBtn.addEventListener('click', downloadReport);
+
+    const today = new Date();
+    const weekAgo = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000);
+    dateToInput.value = toDateInputValue(today);
+    dateFromInput.value = toDateInputValue(weekAgo);
+  </script>
+</body>
+</html>

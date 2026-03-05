@@ -1,5 +1,8 @@
 """Вспомогательные функции для владельца."""
 
+from functools import wraps
+from typing import Any, Awaitable, Callable
+
 from aiogram.types import Message, CallbackQuery
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,3 +40,23 @@ async def ensure_owner(event: Message | CallbackQuery, session: AsyncSession | N
 
     await event.answer("⛔ Доступно только владельцу магазина.")
     return False
+
+
+def owner_only(handler: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
+    """Декоратор для ограничения хендлеров только владельцем."""
+
+    @wraps(handler)
+    async def wrapper(event: Message | CallbackQuery, *args: Any, **kwargs: Any) -> Any:
+        session = kwargs.get("session")
+        if session is None:
+            for arg in args:
+                if isinstance(arg, AsyncSession):
+                    session = arg
+                    break
+
+        if not await ensure_owner(event, session):
+            return None
+
+        return await handler(event, *args, **kwargs)
+
+    return wrapper

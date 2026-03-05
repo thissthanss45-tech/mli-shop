@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from enum import Enum
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import String, Integer, DateTime, Enum as SQLEnum, BigInteger, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database.db_manager import Base
+
+if TYPE_CHECKING:
+    from .orders import Order
 
 
 class UserRole(Enum):

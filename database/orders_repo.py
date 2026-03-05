@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Sequence, Dict, Any, Optional
 
@@ -8,6 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from models import User, Product, CartItem, Order, OrderItem, OrderStatus, ProductStock
+from models import MovementDirection, MovementOperation
+from database.stock_movement_repo import StockMovementRepo
+
+
+logger = logging.getLogger(__name__)
 
 
 class OrdersRepo:
@@ -108,21 +114,30 @@ class OrdersRepo:
         if not cart_items:
             return None
 
-        # Проверяем доступность товаров
+        required_by_key: dict[tuple[int, str], int] = {}
         for item in cart_items:
             if not item.product:
                 return None
-            
-            # Суммируем остатки по размеру
-            stmt = select(func.sum(ProductStock.quantity)).where(
-                ProductStock.product_id == item.product.id,
-                ProductStock.size == item.size
+
+            key = (item.product.id, item.size)
+            required_by_key[key] = required_by_key.get(key, 0) + int(item.quantity)
+
+        locked_stock_by_key: dict[tuple[int, str], ProductStock] = {}
+        for (product_id, size), required_qty in required_by_key.items():
+            stock_stmt = (
+                select(ProductStock)
+                .where(
+                    ProductStock.product_id == product_id,
+                    ProductStock.size == size,
+                )
+                .with_for_update()
             )
-            res = await self.session.execute(stmt)
-            available = res.scalar_one() or 0
-            
-            if available < item.quantity:
-                return None  # Недостаточно товара
+            stock_res = await self.session.execute(stock_stmt)
+            stock = stock_res.scalar_one_or_none()
+            available = int(stock.quantity) if stock else 0
+            if available < required_qty:
+                return None
+            locked_stock_by_key[(product_id, size)] = stock
 
         # Считаем итоговую сумму
         total = sum(item.quantity * item.price_at_add for item in cart_items)
@@ -140,6 +155,7 @@ class OrdersRepo:
         await self.session.flush()  # Получаем ID заказа
 
         # Создаем позиции заказа и списываем остатки
+        movement_repo = StockMovementRepo(self.session)
         for item in cart_items:
             order_item = OrderItem(
                 order=order,
@@ -150,18 +166,26 @@ class OrdersRepo:
             )
             self.session.add(order_item)
 
-            # Списание со склада
-            stmt = select(ProductStock).where(
-                ProductStock.product_id == item.product.id,
-                ProductStock.size == item.size
-            )
-            res = await self.session.execute(stmt)
-            stock = res.scalar_one_or_none()
-            
+            stock = locked_stock_by_key.get((item.product.id, item.size))
             if stock:
+                stock_before = stock.quantity
                 stock.quantity -= item.quantity
                 if stock.quantity < 0:
                     stock.quantity = 0
+
+                await movement_repo.add_movement(
+                    product_id=item.product.id,
+                    order_id=order.id,
+                    size=item.size,
+                    quantity=item.quantity,
+                    stock_before=stock_before,
+                    stock_after=stock.quantity,
+                    direction=MovementDirection.OUT,
+                    operation_type=MovementOperation.SALE,
+                    unit_purchase_price=float(item.product.purchase_price),
+                    unit_sale_price=float(item.price_at_add),
+                    note=f"Order #{order.id} created",
+                )
 
         return order
 
@@ -178,14 +202,27 @@ class OrdersRepo:
         res = await self.session.execute(stmt)
         return res.scalars().all()
 
-    async def get_orders_with_items_by_statuses(self, statuses: Sequence[str]) -> Sequence[Order]:
+    async def get_orders_with_items_by_statuses(
+        self,
+        statuses: Sequence[str],
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+    ) -> Sequence[Order]:
         """Получение заказов по списку статусов с товарами."""
+        conditions = [Order.status.in_(list(statuses))]
+        if start_date and end_date:
+            conditions.append(Order.created_at.between(start_date, end_date))
+        elif start_date:
+            conditions.append(Order.created_at >= start_date)
+        elif end_date:
+            conditions.append(Order.created_at <= end_date)
+
         stmt = (
             select(Order)
             .options(
                 selectinload(Order.items).selectinload(OrderItem.product).selectinload(Product.brand)
             )
-            .where(Order.status.in_(list(statuses)))
+            .where(*conditions)
             .order_by(Order.created_at.desc())
         )
         res = await self.session.execute(stmt)
@@ -263,6 +300,7 @@ class OrdersRepo:
             return False
 
         # Возвращаем товары на склад
+        movement_repo = StockMovementRepo(self.session)
         for item in order.items:
             stmt = select(ProductStock).where(
                 ProductStock.product_id == item.product_id,
@@ -272,7 +310,9 @@ class OrdersRepo:
             stock = res.scalar_one_or_none()
             
             if stock:
+                stock_before = stock.quantity
                 stock.quantity += item.quantity
+                stock_after = stock.quantity
             else:
                 # Если записи о размере не было, создаем новую
                 new_stock = ProductStock(
@@ -281,6 +321,24 @@ class OrdersRepo:
                     quantity=item.quantity
                 )
                 self.session.add(new_stock)
+                stock_before = 0
+                stock_after = item.quantity
+
+            product = await self.session.get(Product, item.product_id)
+            purchase_price = float(product.purchase_price) if product else None
+            await movement_repo.add_movement(
+                product_id=item.product_id,
+                order_id=order.id,
+                size=item.size,
+                quantity=item.quantity,
+                stock_before=stock_before,
+                stock_after=stock_after,
+                direction=MovementDirection.IN,
+                operation_type=MovementOperation.RETURN,
+                unit_purchase_price=purchase_price,
+                unit_sale_price=float(item.sale_price),
+                note=f"Order #{order.id} cancelled",
+            )
 
         # Меняем статус на отмененный
         order.status = OrderStatus.CANCELLED.value
@@ -357,7 +415,8 @@ class OrdersRepo:
                 "revenue": revenue,
                 "profit": revenue - cost,
             }
-        except Exception:
+        except Exception as exc:
+            logger.exception("Failed to calculate order statistics for period %s-%s: %s", start_date, end_date, exc)
             await self.session.rollback()
             return {
                 "count": 0,
@@ -413,7 +472,7 @@ class OrdersRepo:
         for row in rows:
             order, item, product = row
             details.append(
-                f"Заказ #{order.id}: {product.title} ({item.size}) x{item.quantity} = {item.sale_price * item.quantity}₽"
+                f"Заказ #{order.id}: {product.title} (закупка: {product.purchase_price:g} руб., продажа: {item.sale_price:g} руб.) ({item.size}) x{item.quantity} = {item.sale_price * item.quantity}₽"
             )
         
         return details

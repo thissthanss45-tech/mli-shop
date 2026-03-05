@@ -3,11 +3,16 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from sqlalchemy import String, Integer, DateTime, Numeric, ForeignKey, Text, Enum as SQLEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database.db_manager import Base
+
+if TYPE_CHECKING:
+    from .products import Product
+    from .users import User
 
 
 class OrderStatus(Enum):
@@ -63,8 +68,8 @@ class Order(Base):
     )
 
     # Связи
-    user: Mapped[User] = relationship("User", back_populates="orders")
-    items: Mapped[list[OrderItem]] = relationship(
+    user: Mapped["User"] = relationship("User", back_populates="orders")
+    items: Mapped[list["OrderItem"]] = relationship(
         "OrderItem", 
         back_populates="order",
         cascade="all, delete-orphan"
@@ -104,8 +109,8 @@ class OrderItem(Base):
     )
 
     # Связи
-    order: Mapped[Order] = relationship("Order", back_populates="items")
-    product: Mapped[Product] = relationship("Product")
+    order: Mapped["Order"] = relationship("Order", back_populates="items")
+    product: Mapped["Product"] = relationship("Product")
 
     @property
     def total_price(self) -> Decimal:
@@ -152,8 +157,8 @@ class CartItem(Base):
     )
 
     # Связи
-    user: Mapped[User] = relationship("User")
-    product: Mapped[Product] = relationship("Product")
+    user: Mapped["User"] = relationship("User")
+    product: Mapped["Product"] = relationship("Product")
 
     @property
     def total_price(self) -> Decimal:

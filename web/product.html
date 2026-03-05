@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MLI Shop — Товар</title>
+  <link rel="stylesheet" href="/web/styles.css" />
+</head>
+<body>
+  <div class="bg-glow bg-glow--1"></div>
+  <div class="bg-glow bg-glow--2"></div>
+
+  <header class="header">
+    <div class="container header__inner">
+      <div>
+        <p class="badge">MLI SHOP</p>
+        <h1>Карточка товара</h1>
+        <p class="subtitle">Детальная страница товара из базы PostgreSQL</p>
+      </div>
+      <div class="header-actions">
+        <a class="docs-link" href="/admin">🛠 Админ</a>
+        <a class="docs-link" href="/" rel="noreferrer">← В каталог</a>
+        <a class="docs-link" href="/about">🏬 О магазине</a>
+        <a class="docs-link" href="/ai-chat">✨ AI чат</a>
+        <a class="cart-pill" href="/cart">🛒 Корзина</a>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="product-wrap" id="product-wrap">
+      <p class="meta">Загрузка товара…</p>
+    </section>
+  </main>
+
+  <script>
+    function formatPrice(value) {
+      return new Intl.NumberFormat('ru-RU').format(value) + ' ₽';
+    }
+
+    function readCart() {
+      try {
+        return JSON.parse(localStorage.getItem('mli_cart') || '[]');
+      } catch {
+        return [];
+      }
+    }
+
+    function addToCart(item) {
+      const cart = readCart();
+      if (!cart.find((x) => x.id === item.id)) {
+        cart.push({
+          id: item.id,
+          name: item.name,
+          description: item.description,
+          price: item.price,
+          category_id: item.category_id,
+          category_name: item.category_name,
+          brand_id: item.brand_id,
+          brand_name: item.brand_name,
+          image_url: item.image_url,
+        });
+        localStorage.setItem('mli_cart', JSON.stringify(cart));
+      }
+    }
+
+    function getProductIdFromPath() {
+      const parts = window.location.pathname.split('/').filter(Boolean);
+      const id = Number(parts[parts.length - 1]);
+      return Number.isFinite(id) && id > 0 ? id : null;
+    }
+
+    function renderNotFound(message) {
+      const wrap = document.getElementById('product-wrap');
+      wrap.innerHTML = `<div class="card"><p class="empty">${message}</p></div>`;
+    }
+
+    function renderProduct(item) {
+      const wrap = document.getElementById('product-wrap');
+      wrap.innerHTML = `
+        <article class="card card--product">
+          <img class="card__image card__image--detail" src="${item.image_url || '/web/no-image.svg'}" alt="Фото товара" loading="lazy" />
+          <div class="card__top">
+            <h2 class="card__title">${item.name}</h2>
+            <span class="card__price">${formatPrice(item.price)}</span>
+          </div>
+          <p class="card__desc">${item.description || 'Описание не указано'}</p>
+          <div class="card__tags">
+            <span class="tag">ID: ${item.id}</span>
+            <span class="tag">${item.category_name ? `Категория: ${item.category_name}` : `Категория #${item.category_id}`}</span>
+            <span class="tag">${item.brand_name ? `Бренд: ${item.brand_name}` : `Бренд #${item.brand_id ?? '—'}`}</span>
+            <span class="tag">В наличии: ${item.stock}</span>
+          </div>
+          <div class="product-actions">
+            <button class="card__buy" id="buy-btn" type="button">Купить</button>
+            <a class="card__more" href="/">Вернуться в каталог</a>
+            <a class="card__more card__more--ghost" href="/docs" target="_blank" rel="noreferrer">Открыть API Docs</a>
+          </div>
+        </article>
+      `;
+
+      const image = wrap.querySelector('.card__image');
+      image.onerror = () => {
+        image.src = '/web/no-image.svg';
+      };
+
+      wrap.querySelector('#buy-btn').addEventListener('click', () => {
+        addToCart(item);
+        wrap.querySelector('#buy-btn').textContent = 'Добавлено ✓';
+      });
+    }
+
+    async function loadProduct() {
+      const productId = getProductIdFromPath();
+      if (!productId) {
+        renderNotFound('Некорректный идентификатор товара.');
+        return;
+      }
+
+      try {
+        const res = await fetch(`/api/products/${productId}`);
+        if (res.status === 404) {
+          renderNotFound('Товар не найден.');
+          return;
+        }
+        if (!res.ok) {
+          renderNotFound('Ошибка загрузки товара. Попробуйте позже.');
+          return;
+        }
+        const data = await res.json();
+        renderProduct(data);
+      } catch (error) {
+        renderNotFound('Сервис временно недоступен.');
+      }
+    }
+
+    loadProduct();
+  </script>
+</body>
+</html>

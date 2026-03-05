@@ -1,0 +1,19 @@
+Дата обновления: 2026-02-25
+
+Статус: PRODUCTION READY (локальный деплой выполнен)
+
+Что реализовано:
+- Telegram bot + worker на общей БД
+- FastAPI web_api с витриной, корзиной, checkout, AI-чатом
+- Админка /admin: CRUD товаров, отчёт period.xlsx
+- Telegram-уведомления о web-заказах owner/staff
+
+Проверено:
+- docker compose up -d --build db redis rabbitmq bot worker web_api
+- /api/health = 200
+- /admin = 200
+- /docs = 200
+- /api/admin/reports/period.xlsx = 200 (валидный XLSX)
+
+Примечания:
+- Админ-ключ берётся из WEB_ADMIN_KEY, иначе fallback на OWNER_ID.

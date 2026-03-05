@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MLI Shop — Корзина</title>
+  <link rel="stylesheet" href="/web/styles.css" />
+</head>
+<body>
+  <div class="bg-glow bg-glow--1"></div>
+  <div class="bg-glow bg-glow--2"></div>
+
+  <header class="header">
+    <div class="container header__inner">
+      <div>
+        <p class="badge">MLI SHOP</p>
+        <h1>Корзина</h1>
+        <p class="subtitle">Проверьте состав заказа перед оформлением</p>
+      </div>
+      <div class="header-actions">
+        <a class="docs-link" href="/admin">🛠 Админ</a>
+        <a class="docs-link" href="/">← В каталог</a>
+        <a class="docs-link" href="/about">🏬 О магазине</a>
+        <a class="docs-link" href="/ai-chat">✨ AI чат</a>
+      </div>
+    </div>
+  </header>
+
+  <main class="container cart-wrap">
+    <section class="card checkout-form">
+      <h3 class="card__title">Данные для оформления</h3>
+      <div class="checkout-grid">
+        <div class="control">
+          <label for="full-name">Имя</label>
+          <input id="full-name" type="text" placeholder="Ваше имя" required />
+        </div>
+        <div class="control">
+          <label for="phone">Телефон</label>
+          <input id="phone" type="tel" placeholder="+7..." required />
+        </div>
+      </div>
+      <div class="control">
+        <label for="address">Адрес (необязательно)</label>
+        <input id="address" type="text" placeholder="Город, улица, дом" />
+      </div>
+    </section>
+
+    <section id="cart-list" class="cart-list"></section>
+
+    <section class="cart-summary" id="cart-summary">
+      <div>
+        <p class="cart-summary__label">Итого</p>
+        <p class="cart-summary__value" id="cart-total">0 ₽</p>
+      </div>
+      <button class="card__buy cart-checkout" id="checkout-btn" type="button">Оформить заказ</button>
+    </section>
+  </main>
+
+  <script>
+    const cartList = document.getElementById('cart-list');
+    const cartTotal = document.getElementById('cart-total');
+    const checkoutBtn = document.getElementById('checkout-btn');
+    const fullNameInput = document.getElementById('full-name');
+    const phoneInput = document.getElementById('phone');
+    const addressInput = document.getElementById('address');
+
+    function readCart() {
+      try {
+        return JSON.parse(localStorage.getItem('mli_cart') || '[]');
+      } catch {
+        return [];
+      }
+    }
+
+    function writeCart(items) {
+      localStorage.setItem('mli_cart', JSON.stringify(items));
+    }
+
+    function formatPrice(value) {
+      return new Intl.NumberFormat('ru-RU').format(value) + ' ₽';
+    }
+
+    function removeFromCart(id) {
+      const items = readCart().filter((item) => item.id !== id);
+      writeCart(items);
+      renderCart();
+    }
+
+    function renderCart() {
+      const items = readCart();
+      cartList.innerHTML = '';
+
+      if (!items.length) {
+        cartList.innerHTML = '<div class="card"><p class="empty">Корзина пуста. Добавьте товары из каталога.</p></div>';
+        cartTotal.textContent = '0 ₽';
+        checkoutBtn.disabled = true;
+        checkoutBtn.textContent = 'Оформить заказ';
+        return;
+      }
+
+      let total = 0;
+
+      for (const item of items) {
+        total += Number(item.price || 0);
+
+        const article = document.createElement('article');
+        article.className = 'card cart-item';
+        article.innerHTML = `
+          <img class="card__image cart-item__image" src="${item.image_url || '/web/no-image.svg'}" alt="Фото товара" loading="lazy" />
+          <div class="cart-item__body">
+            <h3 class="card__title">${item.name}</h3>
+            <p class="card__desc">${item.description || 'Описание не указано'}</p>
+            <div class="card__tags">
+              <span class="tag">${item.category_name ? `Категория: ${item.category_name}` : `Категория #${item.category_id}`}</span>
+              <span class="tag">${item.brand_name ? `Бренд: ${item.brand_name}` : `Бренд #${item.brand_id ?? '—'}`}</span>
+            </div>
+          </div>
+          <div class="cart-item__side">
+            <p class="card__price">${formatPrice(item.price)}</p>
+            <button class="card__more card__more--ghost" data-remove="${item.id}" type="button">Удалить</button>
+          </div>
+        `;
+
+        const img = article.querySelector('img');
+        img.onerror = () => {
+          img.src = '/web/no-image.svg';
+        };
+
+        article.querySelector('[data-remove]').addEventListener('click', () => removeFromCart(item.id));
+        cartList.appendChild(article);
+      }
+
+      cartTotal.textContent = formatPrice(total);
+      checkoutBtn.disabled = false;
+    }
+
+    checkoutBtn.addEventListener('click', () => {
+      const fullName = fullNameInput.value.trim();
+      const phone = phoneInput.value.trim();
+      const address = addressInput.value.trim();
+      const items = readCart();
+      if (!items.length) return;
+
+      if (!fullName) {
+        alert('Введите имя для оформления заказа.');
+        fullNameInput.focus();
+        return;
+      }
+
+      if (!phone) {
+        alert('Введите телефон для оформления заказа.');
+        phoneInput.focus();
+        return;
+      }
+
+      const payload = {
+        full_name: fullName,
+        phone,
+        address: address || null,
+        items: items.map((item) => ({
+          product_id: item.id,
+          quantity: 1,
+          size: null,
+        })),
+      };
+
+      checkoutBtn.disabled = true;
+      checkoutBtn.textContent = 'Оформляем...';
+
+      fetch('/api/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+        .then(async (res) => {
+          if (!res.ok) {
+            const errorPayload = await res.json().catch(() => ({}));
+            const detail = errorPayload.detail || `HTTP ${res.status}`;
+            throw new Error(detail);
+          }
+          return res.json();
+        })
+        .then((result) => {
+          alert(`Заказ #${result.order_id} оформлен!\nСумма: ${formatPrice(result.total_price)}`);
+          writeCart([]);
+          renderCart();
+          window.location.href = '/';
+        })
+        .catch((error) => {
+          alert(`Ошибка оформления: ${error.message}`);
+        })
+        .finally(() => {
+          checkoutBtn.disabled = false;
+          checkoutBtn.textContent = 'Оформить заказ';
+        });
+    });
+
+    renderCart();
+  </script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="500" viewBox="0 0 800 500" fill="none">
+  <rect width="800" height="500" rx="24" fill="#0F172A"/>
+  <rect x="24" y="24" width="752" height="452" rx="18" fill="#1E293B" stroke="#334155"/>
+  <path d="M255 326L335 246L394 305L503 196L607 326" stroke="#94A3B8" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="303" cy="179" r="31" fill="#94A3B8"/>
+  <text x="400" y="430" text-anchor="middle" fill="#CBD5E1" font-family="Arial, sans-serif" font-size="34">Фото товара недоступно</text>
+</svg>
