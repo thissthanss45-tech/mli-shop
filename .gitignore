@@ -5,3 +5,17 @@ __pycache__/
 *.pyd
 *.log
 ## Chat Customization Diagnostics.md
+
+# Project dump files
+full_project_code.txt
+dump_project.py
+save_project.py
+*.log
+shop_db_backup.sql
+
+# Project dump files
+full_project_code.txt
+dump_project.py
+save_project.py
+*.log
+shop_db_backup.sql
