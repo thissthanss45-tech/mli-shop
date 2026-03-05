@@ -4,6 +4,8 @@ import asyncio
 import sys
 
 from aiogram import Bot, Dispatcher
+from aiogram.types import ErrorEvent
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.storage.redis import RedisStorage 
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
@@ -18,12 +20,47 @@ from models.users import normalize_role
 
 from middlewares.db import DbSessionMiddleware
 from middlewares.block_user import BlockUserMiddleware
-from handlers import client_router, product_router, main_router, ai_router, admin_router, warehouse_router
+from middlewares.trace import TraceMiddleware
+from utils.trace import get_trace_id
+from handlers import (
+    client_router,
+    product_router,
+    main_router,
+    ai_router,
+    admin_router,
+    warehouse_router,
+    admin_orders_router,
+)
 
 # Настройка логгера
 logger.remove()
-logger.add(sys.stderr, format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan> - <level>{message}</level>")
-logger.add("bot_logs.log", rotation="5 MB", compression="zip", level="INFO")
+
+
+def _trace_patcher(record):
+    record["extra"].setdefault("trace_id", get_trace_id())
+
+
+logger.configure(patcher=_trace_patcher)
+logger.add(
+    sys.stderr,
+    format=(
+        "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
+        "<level>{level: <8}</level> | "
+        "<cyan>{name}</cyan>:<cyan>{function}</cyan> | "
+        "trace={extra[trace_id]} | "
+        "<level>{message}</level>"
+    ),
+)
+logger.add(
+    "/tmp/bot_logs.log",
+    rotation="5 MB",
+    compression="zip",
+    level="INFO",
+    format=(
+        "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | "
+        "{name}:{function} | trace={extra[trace_id]} | {message}"
+    ),
+)
 
 
 async def start_handler(message: Message, session: AsyncSession) -> None:
@@ -141,11 +178,22 @@ async def on_startup() -> None:
 
 def setup_routers(dp: Dispatcher) -> None:
     dp.include_router(admin_router)
+    dp.include_router(admin_orders_router)
     dp.include_router(ai_router)
     dp.include_router(product_router)
     dp.include_router(warehouse_router)  # 👈 НОВЫЙ СКЛАД
     dp.include_router(main_router)
     dp.include_router(client_router)
+
+
+def setup_error_handlers(dp: Dispatcher) -> None:
+    @dp.errors()
+    async def _global_errors(event: ErrorEvent):
+        exc = event.exception
+        if isinstance(exc, TelegramBadRequest) and "message is not modified" in str(exc).lower():
+            logger.debug(f"Suppressed harmless TelegramBadRequest: {exc}")
+            return
+        logger.exception(f"Unhandled dispatcher error: {exc}")
 
 
 async def main() -> None:
@@ -155,7 +203,10 @@ async def main() -> None:
 
     db_session_mw = DbSessionMiddleware(session_pool=async_session_maker)
     block_user_mw = BlockUserMiddleware(session_pool=async_session_maker)
+    trace_mw = TraceMiddleware()
 
+    # TraceMiddleware — самый первый: устанавливает trace_id до всех остальных
+    dp.update.outer_middleware(trace_mw)
     dp.update.middleware(db_session_mw)
     dp.message.middleware(block_user_mw)
     dp.callback_query.middleware(block_user_mw)
@@ -165,6 +216,7 @@ async def main() -> None:
     dp.message.register(unset_staff_handler, Command("unstaff"))
 
     setup_routers(dp)
+    setup_error_handlers(dp)
 
     await on_startup()
     logger.info("Запускаю бота…")
