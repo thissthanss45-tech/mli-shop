@@ -338,10 +338,10 @@ DEEPSEEK_MODEL=deepseek-chat
 ### Минимальные примеры
 
 ```text
-/add_owner 8015307297
-/staff 1200382005
-/block 1200382005
-/gift 1200382005 10
+/add_owner 123456789
+/staff 987654321
+/block 987654321
+/gift 987654321 10
 /ai_provider deepseek
 /resetdb
 ```
