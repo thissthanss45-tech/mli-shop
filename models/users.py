@@ -4,13 +4,15 @@ from enum import Enum
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import String, Integer, DateTime, Enum as SQLEnum, BigInteger, Boolean
+from sqlalchemy import String, Integer, DateTime, Enum as SQLEnum, BigInteger, Boolean, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database.db_manager import Base
 
 if TYPE_CHECKING:
     from .orders import Order
+    from .tenants import Tenant
+    from .memberships import TenantMembership
 
 
 class UserRole(Enum):
@@ -18,6 +20,14 @@ class UserRole(Enum):
     CLIENT = "client"
     STAFF = "staff"
     OWNER = "owner"
+
+    @classmethod
+    def as_sql_enum(cls) -> SQLEnum:
+        return SQLEnum(
+            cls,
+            values_callable=lambda enums: [e.value for e in enums],
+            name="userrole",
+        )
 
 
 def normalize_role(role: str | UserRole) -> str:
@@ -33,16 +43,18 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     tg_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True, nullable=False)
+    tenant_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
     first_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     last_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     
     role: Mapped[str] = mapped_column(
-        SQLEnum(
-            UserRole,
-            values_callable=lambda enums: [e.value for e in enums],
-            name="userrole",
-        ),
+        UserRole.as_sql_enum(),
         default=UserRole.CLIENT.value,
         nullable=False,
     )
@@ -64,6 +76,12 @@ class User(Base):
     )
 
     # Связи
+    tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="users")
+    memberships: Mapped[list["TenantMembership"]] = relationship(
+        "TenantMembership",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
     orders: Mapped[list["Order"]] = relationship(
         "Order",
         back_populates="user",

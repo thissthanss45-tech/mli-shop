@@ -18,30 +18,44 @@ fi
 cd "$(dirname "$0")/.."
 
 mkdir -p certbot/conf certbot/www
+BOOTSTRAP_DIR="certbot/conf/live/${DOMAIN}"
+BOOTSTRAP_MARKER="${BOOTSTRAP_DIR}/.bootstrap"
 
-echo "[1/4] Starting core services (without nginx/certbot)..."
-docker compose up -d db redis rabbitmq bot worker web_api
+echo "[1/5] Ensuring bootstrap certificate for $DOMAIN ..."
+./scripts/ensure_bootstrap_cert.sh "$DOMAIN"
 
-echo "[2/4] Requesting Let's Encrypt certificate for $DOMAIN ..."
-# stop nginx if it is running to free port 80 for standalone challenge
-if docker compose ps nginx --status running >/dev/null 2>&1; then
-  docker compose stop nginx || true
+echo "[2/5] Starting core services and HTTP reverse proxy ..."
+TLS_DOMAIN="$DOMAIN" docker compose up -d db redis rabbitmq bot worker web_api nginx
+
+echo "[3/5] Requesting Let's Encrypt certificate for $DOMAIN ..."
+if [[ -f "${BOOTSTRAP_MARKER}" ]]; then
+  rm -rf "${BOOTSTRAP_DIR}"
 fi
 
-docker compose run --rm --service-ports \
+docker compose run --rm \
   -e TLS_DOMAIN="$DOMAIN" \
   certbot certonly \
-  --standalone \
-  --preferred-challenges http \
+  --webroot \
+  --webroot-path /var/www/certbot \
   --non-interactive \
   --agree-tos \
   --email "$EMAIL" \
+  --keep-until-expiring \
   -d "$DOMAIN"
 
-echo "[3/4] Starting nginx with TLS config..."
-TLS_DOMAIN="$DOMAIN" docker compose up -d nginx
+LATEST_CERT_DIR="$(find certbot/conf/live -maxdepth 1 -mindepth 1 -type d -name "${DOMAIN}*" | sort | tail -n 1)"
 
-echo "[4/4] Done. Health check:"
+if [[ -n "${LATEST_CERT_DIR}" ]]; then
+  mkdir -p "${BOOTSTRAP_DIR}"
+  cp "${LATEST_CERT_DIR}/fullchain.pem" "${BOOTSTRAP_DIR}/fullchain.pem"
+  cp "${LATEST_CERT_DIR}/privkey.pem" "${BOOTSTRAP_DIR}/privkey.pem"
+  rm -f "${BOOTSTRAP_MARKER}"
+fi
+
+echo "[4/5] Reloading nginx with issued certificate..."
+TLS_DOMAIN="$DOMAIN" docker compose up -d --force-recreate nginx
+
+echo "[5/5] Done. Health check:"
 curl -sS -I "https://$DOMAIN/api/health" || true
 
 echo "TLS setup finished for $DOMAIN"

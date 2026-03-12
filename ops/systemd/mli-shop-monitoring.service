@@ -1,0 +1,18 @@
+[Unit]
+Description=MLI Shop Monitoring Stack
+After=network-online.target docker.service mli-shop-main.service
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/mli_shop_project
+Environment=ENV_FILE=.env
+ExecStart=/usr/bin/docker compose --env-file .env -f docker-compose.yml -f docker-compose.monitoring.yml up -d prometheus alertmanager grafana
+ExecStop=/usr/bin/docker compose --env-file .env -f docker-compose.yml -f docker-compose.monitoring.yml stop grafana alertmanager prometheus
+ExecReload=/usr/bin/docker compose --env-file .env -f docker-compose.yml -f docker-compose.monitoring.yml up -d prometheus alertmanager grafana
+RemainAfterExit=yes
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

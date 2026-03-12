@@ -80,6 +80,18 @@
       return new Intl.NumberFormat('ru-RU').format(value) + ' ₽';
     }
 
+    function renderMediaMarkup(item, className = 'card__image cart-item__image') {
+      const url = item.primary_media_url || item.image_url;
+      const type = item.primary_media_type || 'photo';
+      if (!url) {
+        return `<img class="${className}" src="/web/no-image.svg" alt="Нет медиа" loading="lazy" />`;
+      }
+      if (type === 'video') {
+        return `<video class="${className}" src="${url}" muted playsinline preload="metadata"></video>`;
+      }
+      return `<img class="${className}" src="${url}" alt="Фото товара" loading="lazy" />`;
+    }
+
     function removeFromCart(id) {
       const items = readCart().filter((item) => item.id !== id);
       writeCart(items);
@@ -106,7 +118,7 @@
         const article = document.createElement('article');
         article.className = 'card cart-item';
         article.innerHTML = `
-          <img class="card__image cart-item__image" src="${item.image_url || '/web/no-image.svg'}" alt="Фото товара" loading="lazy" />
+          ${renderMediaMarkup(item)}
           <div class="cart-item__body">
             <h3 class="card__title">${item.name}</h3>
             <p class="card__desc">${item.description || 'Описание не указано'}</p>
@@ -122,9 +134,11 @@
         `;
 
         const img = article.querySelector('img');
-        img.onerror = () => {
-          img.src = '/web/no-image.svg';
-        };
+        if (img) {
+          img.onerror = () => {
+            img.src = '/web/no-image.svg';
+          };
+        }
 
         article.querySelector('[data-remove]').addEventListener('click', () => removeFromCart(item.id));
         cartList.appendChild(article);

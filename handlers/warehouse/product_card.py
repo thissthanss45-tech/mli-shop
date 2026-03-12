@@ -11,12 +11,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.catalog_repo import CatalogRepo
 from models import Category, Brand, Order, OrderItem, OrderStatus
+from utils.tenants import get_runtime_tenant
 from ..owner_states import EditProductStates
 from ..owner_utils import ensure_owner, owner_only, show_owner_main_menu
 from .common import warehouse_router
 
 
 _EXIT_TEXTS = {"⬅ Назад", "🔙 Назад", "↩️ Назад", "↩️ Отмена", "Отмена", "🧭 В меню", "🏠 Меню"}
+
+
+async def _get_catalog_repo(session: AsyncSession) -> CatalogRepo:
+    tenant = await get_runtime_tenant(session)
+    return CatalogRepo(session, tenant_id=tenant.id)
 
 
 def _parse_warehouse_product_callback(callback_data: str) -> tuple[int, bool, int | None]:
@@ -52,9 +58,9 @@ async def warehouse_brands_page(callback: CallbackQuery, session: AsyncSession):
 
 async def show_brands_page(callback: CallbackQuery, session: AsyncSession, cat_id: int, page: int) -> None:
     page_size = 8
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
 
-    category = await session.get(Category, cat_id)
+    category = await repo.get_category(cat_id)
     total_count = await repo.count_brands_by_category(cat_id)
     if not category or total_count == 0:
         await callback.answer("В этой категории нет брендов с товарами.", show_alert=True)
@@ -114,9 +120,9 @@ async def warehouse_show_products(callback: CallbackQuery, session: AsyncSession
 
 
 async def show_products_list(callback: CallbackQuery, session: AsyncSession, cat_id: int, brand_id: int, sort_by: str):
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     products = await repo.get_products_sorted(cat_id, brand_id, sort_by)
-    brand = await session.get(Brand, brand_id)
+    brand = await repo.get_brand(brand_id)
 
     if not products:
         await callback.answer("Товаров не найдено", show_alert=True)
@@ -213,7 +219,7 @@ async def warehouse_product_card(callback: CallbackQuery, session: AsyncSession,
             await state.update_data(warehouse_back_mode="brand", procurement_qty=None)
         message = callback.message
 
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     product = await repo.get_product_with_details(product_id)
 
     if not product:
@@ -229,6 +235,8 @@ async def warehouse_product_card(callback: CallbackQuery, session: AsyncSession,
         select(OrderItem.size, func.coalesce(func.sum(OrderItem.quantity), 0).label("sold_qty"))
         .join(Order, Order.id == OrderItem.order_id)
         .where(
+            Order.tenant_id == product.tenant_id,
+            OrderItem.tenant_id == product.tenant_id,
             OrderItem.product_id == product.id,
             Order.status == OrderStatus.COMPLETED.value,
         )
@@ -300,7 +308,13 @@ async def warehouse_product_card(callback: CallbackQuery, session: AsyncSession,
             await message.delete()
         except Exception:
             pass
-        await message.answer_photo(product.photos[0].file_id, caption=text, reply_markup=kb.as_markup(), parse_mode="HTML")
+        from utils.product_media import normalize_media_type
+
+        media = product.photos[0]
+        if normalize_media_type(getattr(media, "media_type", None)) == "video":
+            await message.answer_video(media.file_id, caption=text, reply_markup=kb.as_markup(), parse_mode="HTML")
+        else:
+            await message.answer_photo(media.file_id, caption=text, reply_markup=kb.as_markup(), parse_mode="HTML")
     else:
         if message.photo:
             await message.delete()
@@ -363,7 +377,7 @@ async def edit_price_process(message: Message, state: FSMContext, session: Async
         new_sale = float(parts[1])
 
         data = await state.get_data()
-        repo = CatalogRepo(session)
+        repo = await _get_catalog_repo(session)
         await repo.update_product_prices(data["product_id"], new_purchase, new_sale)
         await session.commit()
 
@@ -395,7 +409,7 @@ async def edit_brand_process(message: Message, state: FSMContext, session: Async
         return
 
     data = await state.get_data()
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     updated = await repo.update_product_brand(data["product_id"], brand_name)
     if not updated:
         await message.answer("⚠️ Не удалось обновить бренд. Проверьте название и попробуйте снова.")
@@ -411,7 +425,7 @@ async def edit_brand_process(message: Message, state: FSMContext, session: Async
 @owner_only
 async def edit_stock_start(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     data = await state.get_data()
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     product = await repo.get_product_with_details(data["product_id"])
 
     kb = InlineKeyboardBuilder()
@@ -457,7 +471,7 @@ async def edit_stock_process(message: Message, state: FSMContext, session: Async
 
     data = await state.get_data()
     product_id = data["product_id"]
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
 
     try:
         if data.get("editing_size"):
@@ -505,7 +519,7 @@ async def edit_desc_process(message: Message, state: FSMContext, session: AsyncS
         desc = None
 
     data = await state.get_data()
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     await repo.update_product_description(data["product_id"], desc)
     await session.commit()
 

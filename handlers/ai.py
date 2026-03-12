@@ -25,9 +25,17 @@ from redis.asyncio import Redis
 from config import settings
 from database.catalog_repo import CatalogRepo
 from database.orders_repo import OrdersRepo
-from models import Product, User, UserRole, Order, OrderItem, OrderStatus, StockMovement, MovementDirection, MovementOperation
-from models.users import normalize_role
+from models import Product, User, UserRole, Order, OrderItem, OrderStatus, StockMovement, MovementDirection, MovementOperation, TenantMembership
 from utils.mq import send_task_to_queue
+from utils.tenants import (
+    get_or_create_default_tenant_user,
+    get_primary_owner_tg_id,
+    get_runtime_tenant,
+    get_runtime_tenant_role_for_tg_id,
+    is_runtime_owner,
+    is_runtime_owner_or_staff,
+    list_tenant_recipient_ids,
+)
 
 ai_router = Router()
 
@@ -47,6 +55,7 @@ GROQ_STT_MODEL = "whisper-large-v3-turbo"
 class AIStates(StatesGroup):
     chatting = State()
     waiting_for_size = State()
+    waiting_for_quantity = State()
     waiting_for_order_name = State()
     waiting_for_order_phone = State()
 
@@ -106,6 +115,20 @@ def _is_checkout_request(text: str) -> bool:
     )
 
 
+def _has_configured_ai_key(value: str | None) -> bool:
+    normalized = (value or "").strip()
+    return bool(normalized and normalized.lower() != "disabled-placeholder")
+
+
+def _get_available_ai_providers() -> list[str]:
+    providers: list[str] = []
+    if _has_configured_ai_key(settings.deepseek_api_key):
+        providers.append("deepseek")
+    if _has_configured_ai_key(settings.groq_api_key):
+        providers.append("groq")
+    return providers
+
+
 def _get_redis_cache() -> Redis | None:
     """Lazy Redis initialization shared by caching helpers."""
     global redis_cache
@@ -143,6 +166,20 @@ async def _set_cached_context(cache_key: str, value: str) -> None:
         logger.error("Redis set failed for %s: %s", cache_key, exc)
 
 
+def _tenant_cache_key(base_key: str, tenant_id: int) -> str:
+    return f"{base_key}:{tenant_id}"
+
+
+async def _get_catalog_repo(session: AsyncSession) -> CatalogRepo:
+    tenant = await get_runtime_tenant(session)
+    return CatalogRepo(session, tenant_id=tenant.id)
+
+
+async def _get_orders_repo(session: AsyncSession) -> OrdersRepo:
+    tenant = await get_runtime_tenant(session)
+    return OrdersRepo(session, tenant_id=tenant.id)
+
+
 async def _get_ai_provider() -> str:
     provider = settings.ai_provider or "groq"
     cache = _get_redis_cache()
@@ -169,12 +206,29 @@ async def _set_ai_provider(provider: str) -> bool:
         return False
 
 
-def _build_provider_kb() -> InlineKeyboardBuilder:
+def _build_provider_kb(providers: list[str] | None = None) -> InlineKeyboardBuilder:
     kb = InlineKeyboardBuilder()
-    kb.button(text="🐋 DeepSeek", callback_data="ai_provider:deepseek")
-    kb.button(text="🦙 Llama", callback_data="ai_provider:groq")
+    enabled = providers or _get_available_ai_providers()
+    provider_rows = [
+        ("deepseek", "🐋 DeepSeek"),
+        ("groq", "🦙 Llama"),
+    ]
+    for provider_key, provider_label in provider_rows:
+        if provider_key in enabled:
+            kb.button(text=provider_label, callback_data=f"ai_provider:{provider_key}")
+        else:
+            kb.button(text=f"{provider_label} · недоступен", callback_data=f"ai_provider_unavailable:{provider_key}")
     kb.adjust(2)
     return kb
+
+
+def _ai_trigger_texts() -> set[str]:
+    values = {
+        "✨ AI-Консультант",
+        "🌸 AI-Флорист",
+        str(settings.button_ai or "").strip(),
+    }
+    return {value for value in values if value}
 
 
 async def _acquire_ai_cooldown(user_id: int, seconds: int) -> bool:
@@ -248,7 +302,7 @@ async def _start_ai_session(
     session: AsyncSession,
     user_id: int,
 ) -> None:
-    is_owner = (user_id == settings.owner_id)
+    is_owner = await is_runtime_owner(session, user_id)
 
     if is_owner:
         await message.answer(
@@ -372,12 +426,15 @@ PROMPT_OWNER = """
 """
 
 async def get_client_context(session: AsyncSession) -> str:
+    tenant = await get_runtime_tenant(session)
+    cache_key = _tenant_cache_key(CLIENT_CONTEXT_CACHE_KEY, tenant.id)
+
     # Cache heavy context for 5 minutes to avoid hammering the DB under load.
-    cached = await _get_cached_context(CLIENT_CONTEXT_CACHE_KEY)
+    cached = await _get_cached_context(cache_key)
     if cached:
         return cached
 
-    repo = CatalogRepo(session)
+    repo = CatalogRepo(session, tenant_id=tenant.id)
     products = await repo.get_all_products_with_stock()
     
     if not products:
@@ -392,18 +449,21 @@ async def get_client_context(session: AsyncSession) -> str:
             lines.append(f"• [ID: {p.id}] {brand} {p.title} | {p.sale_price} руб. | Размеры: {sizes}")
     
     context_text = "\n".join(lines) if lines else "Каталог пуст."
-    await _set_cached_context(CLIENT_CONTEXT_CACHE_KEY, context_text)
+    await _set_cached_context(cache_key, context_text)
     return context_text
 
 
 async def get_owner_context(session: AsyncSession) -> str:
+    tenant = await get_runtime_tenant(session)
+    cache_key = _tenant_cache_key(OWNER_CONTEXT_CACHE_KEY, tenant.id)
+
     # Owner analytics is even heavier, so we reuse the same 5-minute cache window.
-    # cached = await _get_cached_context(OWNER_CONTEXT_CACHE_KEY)
+    # cached = await _get_cached_context(cache_key)
     # if cached:
     #     return cached
 
-    catalog_repo = CatalogRepo(session)
-    orders_repo = OrdersRepo(session)
+    catalog_repo = CatalogRepo(session, tenant_id=tenant.id)
+    orders_repo = OrdersRepo(session, tenant_id=tenant.id)
 
     # 1. Общие продажи (за всё время) для анализа неликвида
     sales_map = await orders_repo.get_sales_summary_by_product()
@@ -415,6 +475,7 @@ async def get_owner_context(session: AsyncSession) -> str:
             func.coalesce(func.sum(StockMovement.quantity), 0).label("procured_qty"),
         )
         .where(
+            StockMovement.tenant_id == tenant.id,
             StockMovement.direction == MovementDirection.IN.value,
             StockMovement.operation_type == MovementOperation.MANUAL_ADD.value,
         )
@@ -431,7 +492,11 @@ async def get_owner_context(session: AsyncSession) -> str:
             func.coalesce(func.sum(OrderItem.quantity), 0).label("sold_qty"),
         )
         .join(Order, Order.id == OrderItem.order_id)
-        .where(Order.status == OrderStatus.COMPLETED.value)
+        .where(
+            Order.tenant_id == tenant.id,
+            OrderItem.tenant_id == tenant.id,
+            Order.status == OrderStatus.COMPLETED.value,
+        )
         .group_by(OrderItem.product_id, OrderItem.size)
     )
     sold_sizes_rows = (await session.execute(sold_sizes_stmt)).all()
@@ -546,30 +611,36 @@ async def get_owner_context(session: AsyncSession) -> str:
     )
     
     context_text = summary + "\n".join(lines)
-    # await _set_cached_context(OWNER_CONTEXT_CACHE_KEY, context_text)
+    # await _set_cached_context(cache_key, context_text)
     return context_text
 
 
-@ai_router.message(F.text == settings.button_ai)
+@ai_router.message(F.text.in_(_ai_trigger_texts()))
 async def start_ai_chat(message: Message, state: FSMContext, session: AsyncSession):
     stmt = select(User).where(User.tg_id == message.from_user.id)
     res = await session.execute(stmt)
     user = res.scalar_one_or_none()
-    if user and normalize_role(user.role) == UserRole.STAFF.value:
+    role = await get_runtime_tenant_role_for_tg_id(session, message.from_user.id)
+    if user and role == UserRole.STAFF.value:
         await message.answer("⛔ ИИ недоступен для продавца.")
         return
 
     user_id = message.from_user.id
-    is_admin = user_id in settings.admin_ids
+    is_owner = role == UserRole.OWNER.value
+    available_providers = _get_available_ai_providers()
 
-    if is_admin:
-        kb = _build_provider_kb()
+    if not available_providers:
+        await message.answer("⚠️ Система ИИ временно отключена (нет рабочего ключа).")
+        return
+
+    if is_owner:
+        kb = _build_provider_kb(available_providers)
         await message.answer("Выберите AI провайдера:", reply_markup=kb.as_markup())
         return
 
     provider = await _get_ai_provider()
     required_key = settings.deepseek_api_key if provider == "deepseek" else settings.groq_api_key
-    if not required_key:
+    if not _has_configured_ai_key(required_key):
         await message.answer("⚠️ Система ИИ временно отключена (нет ключа).")
         return
 
@@ -579,13 +650,17 @@ async def start_ai_chat(message: Message, state: FSMContext, session: AsyncSessi
 @ai_router.callback_query(F.data.startswith("ai_provider:"))
 async def ai_provider_selected(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     user_id = callback.from_user.id
-    if user_id not in settings.admin_ids:
+    if not await is_runtime_owner(session, user_id):
         await callback.answer("Недостаточно прав", show_alert=True)
         return
 
     provider = callback.data.split(":", 1)[1].strip().lower()
+    available_providers = _get_available_ai_providers()
     if provider not in {"groq", "deepseek"}:
         await callback.answer("Неизвестный провайдер", show_alert=True)
+        return
+    if provider not in available_providers:
+        await callback.answer("Этот провайдер сейчас недоступен", show_alert=True)
         return
 
     saved = await _set_ai_provider(provider)
@@ -594,7 +669,7 @@ async def ai_provider_selected(callback: CallbackQuery, state: FSMContext, sessi
         return
 
     required_key = settings.deepseek_api_key if provider == "deepseek" else settings.groq_api_key
-    if not required_key:
+    if not _has_configured_ai_key(required_key):
         await _delete_callback_message(callback)
         await callback.message.answer("⚠️ Система ИИ временно отключена (нет ключа).")
         await callback.answer()
@@ -606,10 +681,20 @@ async def ai_provider_selected(callback: CallbackQuery, state: FSMContext, sessi
     await callback.answer()
 
 
+@ai_router.callback_query(F.data.startswith("ai_provider_unavailable:"))
+async def ai_provider_unavailable(callback: CallbackQuery) -> None:
+    provider = callback.data.split(":", 1)[1].strip().lower()
+    labels = {
+        "groq": "Llama (Groq)",
+        "deepseek": "DeepSeek",
+    }
+    await callback.answer(f"{labels.get(provider, provider)} сейчас недоступен в этом магазине", show_alert=True)
+
+
 @ai_router.callback_query(F.data.startswith("ai_cart_add:"))
 async def ai_cart_add(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     product_id = int(callback.data.split(":")[1])
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     product = await repo.get_product_with_details(product_id)
 
     if not product:
@@ -647,7 +732,7 @@ async def ai_cart_size_input(message: Message, state: FSMContext, session: Async
         await state.set_state(AIStates.chatting)
         return
 
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     product = await repo.get_product_with_details(product_id)
 
     if not product:
@@ -667,23 +752,90 @@ async def ai_cart_size_input(message: Message, state: FSMContext, session: Async
         await message.answer(f"Такого размера нет. Доступно: {sizes_str}.")
         return
 
+    await state.update_data(ai_cart_size=match.size)
+    await state.set_state(AIStates.waiting_for_quantity)
+    await message.answer(f"📦 Введите количество для размера {match.size} (доступно: {match.quantity}):")
+
+
+@ai_router.message(AIStates.waiting_for_quantity, F.text)
+async def ai_cart_quantity_input(message: Message, state: FSMContext, session: AsyncSession):
+    quantity_text = (message.text or "").strip()
+    if not quantity_text:
+        await message.answer("Введите количество текстом.")
+        return
+    if quantity_text.startswith("/") or _is_exit_text(quantity_text):
+        await state.set_state(AIStates.chatting)
+        await message.answer("Вы вышли из добавления в корзину. Напишите вопрос.")
+        return
+
+    try:
+        quantity = int(quantity_text)
+        if quantity <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("Введите количество целым числом больше нуля.")
+        return
+
+    data = await state.get_data()
+    product_id = data.get("ai_cart_product_id")
+    selected_size = data.get("ai_cart_size")
+
+    if not product_id or not selected_size:
+        await message.answer("Не удалось определить товар или размер. Откройте карточку еще раз.")
+        await state.set_state(AIStates.chatting)
+        return
+
+    repo = await _get_catalog_repo(session)
+    product = await repo.get_product_with_details(product_id)
+
+    if not product:
+        await message.answer("Товар не найден. Откройте карточку еще раз.")
+        await state.set_state(AIStates.chatting)
+        return
+
+    match = next((stock for stock in product.stock if stock.size.lower() == selected_size.lower() and stock.quantity > 0), None)
+    if not match:
+        await message.answer("Этот размер уже закончился. Откройте карточку товара ещё раз.")
+        await state.set_state(AIStates.chatting)
+        return
+
     stmt = select(User).where(User.tg_id == message.from_user.id)
     res = await session.execute(stmt)
     user = res.scalar_one_or_none()
 
     if user is None:
-        user = User(
+        user, _ = await get_or_create_default_tenant_user(
+            session,
             tg_id=message.from_user.id,
             username=message.from_user.username,
             first_name=message.from_user.first_name,
-            role=UserRole.CLIENT.value,
+            last_name=message.from_user.last_name,
+            default_role=UserRole.CLIENT.value,
             ai_quota=settings.ai_client_start_quota,
         )
-        session.add(user)
         await session.commit()
 
-    orders_repo = OrdersRepo(session)
-    await orders_repo.add_to_cart(user, product, match.size, 1)
+    orders_repo = OrdersRepo(session, tenant_id=user.tenant_id)
+    cart_items = await orders_repo.list_cart_items(user)
+    existing_qty = next(
+        (
+            item.quantity
+            for item in cart_items
+            if item.product_id == product.id and item.size.lower() == selected_size.lower()
+        ),
+        0,
+    )
+    if existing_qty + quantity > match.quantity:
+        available_to_add = match.quantity - existing_qty
+        if available_to_add <= 0:
+            await message.answer(f"В корзине уже максимум для размера {selected_size}: {existing_qty} шт.")
+        else:
+            await message.answer(
+                f"Нельзя добавить {quantity} шт. Для размера {selected_size} доступно только {available_to_add} шт с учетом корзины."
+            )
+        return
+
+    await orders_repo.add_to_cart(user, product, selected_size, quantity)
     await session.commit()
 
     kb = InlineKeyboardBuilder()
@@ -692,7 +844,7 @@ async def ai_cart_size_input(message: Message, state: FSMContext, session: Async
     kb.adjust(1)
 
     await message.answer(
-        f"✅ {product.title} (размер {match.size}) добавлен в корзину!",
+        f"✅ {product.title} (размер {selected_size}, количество {quantity}) добавлен в корзину!",
         reply_markup=kb.as_markup(),
     )
     await state.set_state(AIStates.chatting)
@@ -721,17 +873,18 @@ async def _start_ai_checkout(
     res = await session.execute(stmt)
     user = res.scalar_one_or_none()
     if user is None:
-        user = User(
+        user, _ = await get_or_create_default_tenant_user(
+            session,
             tg_id=actor_user_id,
             username=actor_username,
             first_name=actor_first_name,
-            role=UserRole.CLIENT.value,
+            last_name=None,
+            default_role=UserRole.CLIENT.value,
             ai_quota=settings.ai_client_start_quota,
         )
-        session.add(user)
         await session.commit()
 
-    orders_repo = OrdersRepo(session)
+    orders_repo = OrdersRepo(session, tenant_id=user.tenant_id)
     cart_items = await orders_repo.list_cart_items(user)
     if not cart_items:
         await message.answer("🛒 Корзина пуста. Добавьте товары и затем оформите заказ.")
@@ -792,17 +945,18 @@ async def ai_checkout_phone(message: Message, state: FSMContext, session: AsyncS
     res = await session.execute(stmt)
     user = res.scalar_one_or_none()
     if user is None:
-        user = User(
+        user, _ = await get_or_create_default_tenant_user(
+            session,
             tg_id=message.from_user.id,
             username=message.from_user.username,
             first_name=message.from_user.first_name,
-            role=UserRole.CLIENT.value,
+            last_name=message.from_user.last_name,
+            default_role=UserRole.CLIENT.value,
             ai_quota=settings.ai_client_start_quota,
         )
-        session.add(user)
         await session.commit()
 
-    orders_repo = OrdersRepo(session)
+    orders_repo = OrdersRepo(session, tenant_id=user.tenant_id)
     cart_items = await orders_repo.list_cart_items(user)
     if not cart_items:
         await message.answer("🛒 Корзина пуста. Добавьте товары и попробуйте снова.")
@@ -854,12 +1008,12 @@ async def ai_checkout_phone(message: Message, state: FSMContext, session: AsyncS
             f"📦 <b>Состав заказа:</b>\n"
             f"{items_list_text}"
         )
-        await bot.send_message(settings.owner_id, admin_text, parse_mode="HTML")
-        staff_stmt = select(User.tg_id).where(User.role == UserRole.STAFF.value)
-        staff_res = await session.execute(staff_stmt)
-        staff_ids = staff_res.scalars().all()
-        for staff_id in staff_ids:
-            if staff_id in (settings.owner_id, message.from_user.id):
+        owner_tg_id = await get_primary_owner_tg_id(session, order.tenant_id or 0)
+        recipients = await list_tenant_recipient_ids(session, order.tenant_id or 0)
+        if owner_tg_id:
+            await bot.send_message(owner_tg_id, admin_text, parse_mode="HTML")
+        for staff_id in recipients:
+            if staff_id in {owner_tg_id, message.from_user.id}:
                 continue
             try:
                 await bot.send_message(staff_id, admin_text, parse_mode="HTML")
@@ -999,8 +1153,8 @@ async def _process_ai_input_text(
         return
 
     user_id = message.from_user.id
-    is_owner = (user_id == settings.owner_id)
-    is_admin = user_id in settings.admin_ids
+    is_owner = await is_runtime_owner(session, user_id)
+    can_broadcast_ai_posts = await is_runtime_owner_or_staff(session, user_id)
     user_db: User | None = None
 
     if not is_owner:
@@ -1060,7 +1214,7 @@ async def _process_ai_input_text(
             "chat_id": message.chat.id,
             "user_id": message.from_user.id,
             "messages": messages_payload,
-            "is_admin": is_admin,
+            "can_broadcast_ai_posts": can_broadcast_ai_posts,
         }
         request_id = await send_task_to_queue("ai_generation", task_payload)
         history.append({"role": "user", "content": user_text})
@@ -1108,13 +1262,36 @@ async def process_ai_broadcast(callback: CallbackQuery, state: FSMContext, sessi
     await callback.message.edit_reply_markup(reply_markup=None)
     status_msg = await callback.message.answer("⏳ Начинаю рассылку...")
 
-    stmt = select(User.tg_id).where(User.tg_id != settings.owner_id)
-    result = await session.execute(stmt)
-    user_ids = [uid for uid in result.scalars().all() if uid]
-    staff_stmt = select(User.tg_id).where(User.role == UserRole.STAFF.value)
-    staff_res = await session.execute(staff_stmt)
-    staff_ids = [sid for sid in staff_res.scalars().all() if sid and sid != settings.owner_id]
-    notify_ids = [uid for uid in dict.fromkeys([*user_ids, *staff_ids]) if uid]
+    tenant_id = None
+    actor = (await session.execute(select(User).where(User.tg_id == callback.from_user.id))).scalar_one_or_none()
+    if actor is not None and actor.tenant_id is not None:
+        tenant_id = actor.tenant_id
+    if tenant_id is None:
+        tenant = await get_runtime_tenant(session)
+        tenant_id = tenant.id
+
+    notify_ids: list[int] = []
+    if tenant_id:
+        user_stmt = (
+            select(User.tg_id)
+            .join(TenantMembership, TenantMembership.user_id == User.id)
+            .where(TenantMembership.tenant_id == tenant_id, User.tg_id.is_not(None))
+        )
+        result = await session.execute(user_stmt)
+        user_ids = [uid for uid in result.scalars().all() if uid]
+        staff_ids = await list_tenant_recipient_ids(session, tenant_id)
+        notify_ids = [
+            uid
+            for uid in dict.fromkeys([*user_ids, *staff_ids])
+            if uid and uid != callback.from_user.id
+        ]
+
+    logger.info(
+        "AI broadcast tenant_id=%s actor_tg_id=%s recipients=%s",
+        tenant_id,
+        callback.from_user.id,
+        notify_ids,
+    )
 
     if not notify_ids:
         await status_msg.edit_text("⚠️ Нет пользователей для рассылки.")

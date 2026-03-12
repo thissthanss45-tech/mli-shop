@@ -6,8 +6,14 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.catalog_repo import CatalogRepo
+from utils.tenants import get_runtime_tenant
 from ..owner_utils import owner_only
 from .common import warehouse_router
+
+
+async def _get_catalog_repo(session: AsyncSession) -> CatalogRepo:
+    tenant = await get_runtime_tenant(session)
+    return CatalogRepo(session, tenant_id=tenant.id)
 
 
 @warehouse_router.message(F.text == "📊 Склад")
@@ -17,7 +23,7 @@ async def warehouse_dashboard(message: Message, session: AsyncSession):
 
 
 async def send_warehouse_dashboard(message: Message, session: AsyncSession) -> None:
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     products = await repo.get_all_products_with_stock()
 
     if not products:
@@ -61,7 +67,7 @@ async def send_warehouse_dashboard(message: Message, session: AsyncSession) -> N
 @warehouse_router.callback_query(F.data == "wh:filter:critical")
 @owner_only
 async def filter_critical_stock(callback: CallbackQuery, session: AsyncSession):
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     products = await repo.get_critical_stock_products(limit=15)
 
     if not products:
@@ -82,7 +88,7 @@ async def filter_critical_stock(callback: CallbackQuery, session: AsyncSession):
 @warehouse_router.callback_query(F.data == "wh:filter:margin")
 @owner_only
 async def filter_top_margin(callback: CallbackQuery, session: AsyncSession):
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     products = await repo.get_top_margin_products(limit=5)
 
     if not products:
@@ -103,7 +109,7 @@ async def filter_top_margin(callback: CallbackQuery, session: AsyncSession):
 @warehouse_router.callback_query(F.data == "wh:filter:zero")
 @owner_only
 async def filter_zero_stock(callback: CallbackQuery, session: AsyncSession):
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     products = await repo.get_zero_stock_products(limit=15)
 
     if not products:
@@ -123,7 +129,7 @@ async def filter_zero_stock(callback: CallbackQuery, session: AsyncSession):
 @warehouse_router.callback_query(F.data == "wh:filter:categories")
 @owner_only
 async def filter_by_categories(callback: CallbackQuery, session: AsyncSession):
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     categories = await repo.list_categories()
 
     text = "📂 <b>КАТЕГОРИИ</b>\n\n"

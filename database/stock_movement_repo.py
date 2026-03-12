@@ -11,8 +11,9 @@ from models import StockMovement, MovementDirection, MovementOperation, Product
 
 
 class StockMovementRepo:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, tenant_id: int | None = None) -> None:
         self.session = session
+        self.tenant_id = tenant_id
 
     async def add_movement(
         self,
@@ -30,6 +31,7 @@ class StockMovementRepo:
         note: str | None = None,
     ) -> StockMovement:
         movement = StockMovement(
+            tenant_id=self.tenant_id,
             product_id=product_id,
             order_id=order_id,
             size=size,
@@ -58,5 +60,7 @@ class StockMovementRepo:
             .where(StockMovement.created_at.between(start_date, end_date))
             .order_by(StockMovement.created_at.desc())
         )
+        if self.tenant_id is not None:
+            stmt = stmt.where(StockMovement.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         return res.scalars().all()

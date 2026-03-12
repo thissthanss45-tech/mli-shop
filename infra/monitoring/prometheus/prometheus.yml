@@ -2,6 +2,14 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
 scrape_configs:
   - job_name: mli_web_api
     metrics_path: /api/metrics
@@ -11,3 +19,8 @@ scrape_configs:
   - job_name: prometheus
     static_configs:
       - targets: ["prometheus:9090"]
+
+  - job_name: mli_tenant_metrics
+    metrics_path: /api/metrics/tenants
+    static_configs:
+      - targets: ["web_api:8000"]

@@ -19,7 +19,38 @@
 	- админ-панелью `/admin` (CRUD товаров + Excel отчёт за период).
 - Excel ERP отчёт: листы `Продажи`, `Склад`, `Движение`.
 
+## Tenant SaaS operations
+
+- Операционный runbook по онбордингу магазинов, деплою и мониторингу: [TENANT_OPERATIONS_RUNBOOK.md](TENANT_OPERATIONS_RUNBOOK.md)
+- Tenant-specific smoke endpoint: `GET /api/health/tenant?tenant=<slug>`
+- Tenant-specific Prometheus endpoint: `GET /api/metrics/tenants`
+- Admin API для пресетов ниш и массового provisioning:
+	- `GET /api/admin/tenant-presets`
+	- `POST /api/admin/tenants`
+	- `POST /api/admin/tenants/bulk-provision`
+- Preset provisioning теперь создаёт не только категории и бренды, но и стартовые demo-товары.
+
 ## Production запуск (Docker Compose)
+
+### Быстрый запуск одного Telegram-магазина
+
+Если нужен один активный Telegram-магазин на текущем сервере, используйте launcher:
+
+```bash
+cd /root/mli_shop_project
+chmod +x scripts/launch_tg_shop.sh scripts/launch_flower_shop.sh
+./scripts/launch_flower_shop.sh --bot-token <TOKEN_FROM_BOTFATHER> --owner-id <YOUR_TG_ID>
+```
+
+Что делает launcher:
+
+- создаёт env-файл для запуска;
+- поднимает `db`, `redis`, `rabbitmq`;
+- создаёт tenant магазина с preset `flowers` и demo-товарами;
+- стартует `web_api`, `worker`, `bot`;
+- печатает smoke-check команды.
+
+Важно: текущий `shop.py` поднимает polling только на одном `BOT_TOKEN`, поэтому этот сценарий рассчитан на один активный Telegram-магазин на один bot process.
 
 1. Проверьте `.env`:
 
@@ -28,6 +59,12 @@
 - `CORS_ORIGINS` (обязательный whitelist origins, например `https://shop.example.com,https://admin.shop.example.com`)
 - опционально `WEB_API_PORT` (по умолчанию `8000`)
 - `TLS_DOMAIN` для HTTPS reverse proxy (например, `shop.example.com`)
+
+Важно для production:
+
+- используйте `.env.example` как шаблон и храните реальные `.env*` только на сервере;
+- если какой-либо env-файл с реальными ключами уже попал в git-историю, немедленно ротируйте `BOT_TOKEN`, `WEB_ADMIN_KEY`, `GROQ_API_KEY`, `DEEPSEEK_API_KEY`, пароли PostgreSQL и RabbitMQ;
+- перед запуском заполните `TLS_DOMAIN`, иначе `docker compose` будет поднимать стек с предупреждением и без корректного TLS-конфига.
 
 2. Запустите прод-стек:
 
@@ -132,9 +169,12 @@ chmod +x scripts/setup_tls.sh scripts/renew_tls.sh
 ## Быстрый smoke-test после релиза
 
 - `/api/health` возвращает `status=ok`.
+- `/api/health/tenant?tenant=<slug>` возвращает tenant-specific smoke status и счетчики справочников/ролей.
 - `/admin`: загрузка таблицы товаров, `Сохранить`, `Удалить`.
 - `/admin`: выгрузка отчёта за период (`period.xlsx`).
 - Создание web-заказа отражается в БД и уходит уведомление в Telegram owner/staff.
+
+Для полного operational прогона и onboarding новых магазинов используйте [TENANT_OPERATIONS_RUNBOOK.md](TENANT_OPERATIONS_RUNBOOK.md).
 
 ## CI / Quality Gate
 
@@ -147,16 +187,22 @@ chmod +x scripts/setup_tls.sh scripts/renew_tls.sh
 ## Мониторинг / Observability
 
 - API отдаёт Prometheus-совместимые метрики по `GET /api/metrics`.
+- Tenant readiness gauges для alert rules доступны по `GET /api/metrics/tenants`.
 - Метрики включают:
 	- `app_http_requests_total` — счётчик HTTP запросов (method/path/status)
 	- `app_http_request_duration_seconds` — histogram latency
 	- `app_uptime_seconds` — uptime процесса
+	- `app_tenant_products_total{tenant_slug="..."}` — количество товаров на tenant
+	- `app_tenant_has_bot_token{tenant_slug="..."}` — готовность bot token
+	- `app_tenant_has_admin_api_key{tenant_slug="..."}` — готовность admin key
+	- `app_tenant_status_active{tenant_slug="..."}` — активность tenant
 - Каждый HTTP ответ содержит `X-Request-ID`; если клиент не передал header, ID генерируется на сервере.
 
 Проверка вручную:
 
 ```bash
 curl -sS http://127.0.0.1:${WEB_API_PORT:-8000}/api/metrics | head -n 40
+curl -sS http://127.0.0.1:${WEB_API_PORT:-8000}/api/metrics/tenants | head -n 40
 ```
 
 ### Prometheus + Grafana (готовый стек)
@@ -178,15 +224,49 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose
 Где смотреть:
 
 - Prometheus UI: `http://<host>:${PROMETHEUS_PORT:-9090}`
+- Alertmanager UI: `http://<host>:${ALERTMANAGER_PORT:-9093}`
 - Grafana UI: `http://<host>:${GRAFANA_PORT:-3000}`
 	- логин/пароль по умолчанию: `admin` / `admin`
 	- dashboard уже подхватывается автоматически: **MLI Shop API Overview**
+
+Готовые alert rules включают:
+
+- `MLIWebAPIDown`
+- `MLIWebAPIHigh5xxRate`
+- `MLIWebAPISlowP95`
+- `MLITenantMissingBotToken`
+- `MLITenantMissingAdminAPIKey`
+- `MLITenantEmptyCatalog`
 
 Быстрая проверка scrape:
 
 ```bash
 curl -sS http://127.0.0.1:${PROMETHEUS_PORT:-9090}/api/v1/targets | jq '.data.activeTargets[] | {job: .labels.job, health: .health, scrapeUrl: .scrapeUrl}'
 ```
+
+Reload конфигов мониторинга без перезапуска:
+
+```bash
+./scripts/reload_monitoring.sh
+```
+
+## Backup / Restore
+
+Для production в проект добавлены боевые скрипты работы с PostgreSQL dump:
+
+- backup: `./scripts/db_backup.sh`
+- restore: `./scripts/db_restore.sh --file <dump>`
+- backup drill: `./scripts/db_backup_drill.sh`
+
+Примеры:
+
+```bash
+./scripts/db_backup.sh --env-file .env --label nightly
+./scripts/db_backup.sh --env-file .env.flowers-shop --project-name mli-shop-flowers --label nightly
+./scripts/db_backup_drill.sh --env-file .env
+```
+
+Дампы по умолчанию пишутся в `./backups/` и исключены из git.
 
 ## AI провайдеры (Groq / DeepSeek)
 
@@ -210,3 +290,58 @@ DEEPSEEK_MODEL=deepseek-chat
 - Переключить провайдера: `/ai_provider groq` или `/ai_provider deepseek`
 - Указать модель явно: `/ai_provider deepseek deepseek-chat`
 - Сбросить на значения из `.env`: `/ai_provider reset`
+
+## Telegram-команды владельца
+
+Ниже перечислены команды, которые владелец магазина может выполнять прямо в Telegram.
+
+Важно:
+
+- большинство команд требуют owner-права в текущем tenant;
+- команды, работающие с пользователями по Telegram ID, требуют, чтобы пользователь уже нажал `/start` в этом боте и попал в БД;
+- для multi-tenant сценария предпочтительно использовать tenant-aware команды `/staff` и `/unstaff`.
+
+### Управление ролями
+
+- `/add_owner <telegram_id>`: назначить второго владельца в текущем tenant.
+- `/remove_owner <telegram_id>`: снять роль владельца с пользователя. Главного владельца tenant снять этой командой нельзя.
+- `/staff <telegram_id>`: назначить пользователя продавцом (`STAFF`) в текущем tenant.
+- `/unstaff <telegram_id>`: снять роль продавца и вернуть пользователя в `CLIENT`.
+- `/set_seller <telegram_id>`: назначить пользователя продавцом через owner/admin handler. Оставлена для совместимости, но для tenant-aware сценария лучше использовать `/staff`.
+
+### Управление клиентами
+
+- `/block <telegram_id>`: заблокировать пользователя.
+- `/unblock <telegram_id>`: разблокировать пользователя.
+- блокировка и разблокировка также доступны owner-кнопками из интерфейса поддержки клиента.
+
+### AI и квоты
+
+- `/ai_provider`: показать текущий AI provider и модель.
+- `/ai_provider groq`: переключить AI на Groq.
+- `/ai_provider deepseek`: переключить AI на DeepSeek.
+- `/ai_provider deepseek deepseek-chat`: явно указать модель.
+- `/ai_provider reset`: сбросить AI provider на значения из `.env`.
+- `/gift <telegram_id> <amount>`: начислить пользователю дополнительные AI-запросы.
+- `/ai_audit`: выгрузить TXT-аудит диалогов с AI.
+
+### Промо и меню
+
+- `/promo`: разослать промо-видео из `media/promo.mp4` всем получателям текущего tenant.
+- `/owner`: открыть главное меню владельца.
+
+### Сервисные команды
+
+- `/resetdb`: запросить полную очистку БД магазина с одноразовым кодом подтверждения.
+- `/confirm_resetdb <code>`: подтвердить очистку БД по коду из `/resetdb`.
+
+### Минимальные примеры
+
+```text
+/add_owner 8015307297
+/staff 1200382005
+/block 1200382005
+/gift 1200382005 10
+/ai_provider deepseek
+/resetdb
+```

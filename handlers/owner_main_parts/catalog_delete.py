@@ -8,16 +8,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.catalog_repo import CatalogRepo
 from models.catalog import Product
+from utils.tenants import get_runtime_tenant
 from ..owner_states import DeleteProductStates, DeleteCategoryStates, DeleteBrandStates
 from ..owner_keyboards import build_categories_kb, build_brands_kb
 from ..owner_utils import owner_only, show_owner_main_menu
 from .common import main_router
 
 
+async def _get_catalog_repo(session: AsyncSession) -> CatalogRepo:
+    tenant = await get_runtime_tenant(session)
+    return CatalogRepo(session, tenant_id=tenant.id)
+
+
 @main_router.message(F.text == "🗑 Удалить товар")
 @owner_only
 async def owner_delete_product_start(message: Message, state: FSMContext, session: AsyncSession) -> None:
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     categories = await repo.list_categories()
     if not categories:
         await message.answer("Категории не найдены.")
@@ -32,7 +38,7 @@ async def owner_delete_product_start(message: Message, state: FSMContext, sessio
 async def owner_delete_choose_category(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
     category_id = int(callback.data.split(":")[-1])
     await state.update_data(category_id=category_id)
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     brands = await repo.list_brands()
     if not brands:
         await callback.message.edit_text("Бренды не найдены.")
@@ -47,7 +53,7 @@ async def owner_delete_choose_category(callback: CallbackQuery, state: FSMContex
 async def owner_delete_choose_brand(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
     brand_id = int(callback.data.split(":")[-1])
     data = await state.get_data()
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     products = await repo.list_products_by_category_brand(data.get("category_id"), brand_id)
     if not products:
         await callback.message.edit_text("Товары не найдены.")
@@ -66,7 +72,8 @@ async def owner_delete_choose_brand(callback: CallbackQuery, state: FSMContext, 
 async def owner_delete_confirm(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
     product_id = int(callback.data.split(":")[-1])
     await state.update_data(product_id=product_id)
-    product = await session.get(Product, product_id)
+    repo = await _get_catalog_repo(session)
+    product = await repo.get_product_with_details(product_id)
     if not product:
         await callback.answer("Товар не найден")
         return
@@ -82,7 +89,7 @@ async def owner_delete_confirm(callback: CallbackQuery, state: FSMContext, sessi
 @main_router.callback_query(DeleteProductStates.confirm, F.data == "owner:confirm_delete")
 async def owner_delete_execute(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
     data = await state.get_data()
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     await repo.delete_product(data.get("product_id"))
     await session.commit()
     await state.clear()
@@ -94,7 +101,7 @@ async def owner_delete_execute(callback: CallbackQuery, state: FSMContext, sessi
 @main_router.message(F.text == "🗑 Удалить категорию")
 @owner_only
 async def owner_delete_category_start(message: Message, state: FSMContext, session: AsyncSession) -> None:
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     categories = await repo.list_categories()
     if not categories:
         await message.answer("Нет категорий.")
@@ -125,7 +132,7 @@ async def owner_delete_category_confirm(callback: CallbackQuery, state: FSMConte
 @main_router.callback_query(DeleteCategoryStates.confirm, F.data == "owner:confirm_delcat")
 async def owner_delete_category_execute(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
     data = await state.get_data()
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     await repo.delete_category(data.get("category_id"))
     await session.commit()
     await state.clear()
@@ -137,7 +144,7 @@ async def owner_delete_category_execute(callback: CallbackQuery, state: FSMConte
 @main_router.message(F.text == "🗑 Удалить бренд")
 @owner_only
 async def owner_delete_brand_start(message: Message, state: FSMContext, session: AsyncSession) -> None:
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     brands = await repo.list_brands()
     if not brands:
         await message.answer("Нет брендов.")
@@ -168,7 +175,7 @@ async def owner_delete_brand_confirm(callback: CallbackQuery, state: FSMContext,
 @main_router.callback_query(DeleteBrandStates.confirm, F.data == "owner:confirm_delbrand")
 async def owner_delete_brand_execute(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
     data = await state.get_data()
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     await repo.delete_brand(data.get("brand_id"))
     await session.commit()
     await state.clear()

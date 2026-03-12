@@ -19,12 +19,20 @@ from aiogram.exceptions import TelegramForbiddenError, TelegramNotFound, Telegra
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config import settings
 from models import User, UserRole
 from models.users import normalize_role
 from ..owner_states import SupportReplyStates
 from ..owner_utils import ensure_owner, owner_only, show_owner_main_menu
 from .common import main_router, logger, _send_correct_menu, _is_owner_or_staff
+from utils.tenants import (
+    ensure_tenant_membership,
+    get_membership_for_user,
+    get_primary_owner_tg_id,
+    get_runtime_tenant,
+    get_runtime_tenant_role_for_tg_id,
+    list_tenant_recipient_ids,
+    sync_user_role_from_memberships,
+)
 
 CACHED_PROMO_ID = None
 PROMO_FILE_PATH = "media/promo.mp4"
@@ -97,7 +105,10 @@ async def send_promo_from_server(message: Message, session: AsyncSession):
         [InlineKeyboardButton(text="🛍 Перейти к покупкам", callback_data="catalog_start")]
     ])
 
-    users_result = await session.execute(select(User.tg_id))
+    tenant = await get_runtime_tenant(session)
+    users_result = await session.execute(
+        select(User.tg_id).where(User.tenant_id == tenant.id, User.tg_id.is_not(None))
+    )
     users = [uid for uid in users_result.scalars().all() if uid and uid != message.from_user.id]
 
     if not users:
@@ -153,8 +164,26 @@ async def owner_block_user(message: Message, session: AsyncSession) -> None:
     if not user:
         await message.answer("⚠️ Пользователь не найден.")
         return
-    user.is_blocked = True
+    tenant = await get_runtime_tenant(session)
+    membership = await get_membership_for_user(session, user, tenant.id)
+    if membership is None:
+        await message.answer("⚠️ Пользователь не состоит в текущем tenant.")
+        return
+    if normalize_role(membership.role) == UserRole.OWNER.value:
+        await message.answer("Нельзя заблокировать владельца")
+        return
+    role = await get_runtime_tenant_role_for_tg_id(session, message.from_user.id)
+    if role != UserRole.OWNER.value:
+        await message.answer("Только владелец может блокировать пользователей")
+        return
+    membership.is_blocked = True
     await session.commit()
+    logger.info(
+        "owner_action action=block_user tenant_id=%s actor_tg_id=%s target_tg_id=%s",
+        tenant.id,
+        message.from_user.id,
+        target_id,
+    )
     await message.answer(f"⛔ Пользователь {target_id} заблокирован.")
 
 
@@ -172,8 +201,19 @@ async def owner_unblock_user(message: Message, session: AsyncSession) -> None:
     if not user:
         await message.answer("⚠️ Пользователь не найден.")
         return
-    user.is_blocked = False
+    tenant = await get_runtime_tenant(session)
+    membership = await get_membership_for_user(session, user, tenant.id)
+    if membership is None:
+        await message.answer("⚠️ Пользователь не состоит в текущем tenant.")
+        return
+    membership.is_blocked = False
     await session.commit()
+    logger.info(
+        "owner_action action=unblock_user tenant_id=%s actor_tg_id=%s target_tg_id=%s",
+        tenant.id,
+        message.from_user.id,
+        target_id,
+    )
     await message.answer(f"✅ Пользователь {target_id} разблокирован.")
 
 
@@ -200,8 +240,19 @@ async def owner_add_owner(message: Message, session: AsyncSession) -> None:
         await message.answer("⚠️ Пользователь не найден в БД. Пусть сначала напишет боту /start.")
         return
 
-    user.role = UserRole.OWNER.value
+    tenant = await get_runtime_tenant(session)
+    membership = await ensure_tenant_membership(session, user, tenant.id, UserRole.OWNER.value)
+    membership.role = UserRole.OWNER.value
+    if user.tenant_id is None:
+        user.tenant_id = tenant.id
+    await sync_user_role_from_memberships(session, user)
     await session.commit()
+    logger.info(
+        "owner_action action=add_owner tenant_id=%s actor_tg_id=%s target_tg_id=%s",
+        tenant.id,
+        message.from_user.id,
+        target_id,
+    )
     await message.answer(f"✅ Пользователь {target_id} назначен владельцем.")
 
 
@@ -214,8 +265,10 @@ async def owner_remove_owner(message: Message, session: AsyncSession) -> None:
         return
 
     target_id = int(parts[1])
-    if target_id == settings.owner_id:
-        await message.answer("⛔ Нельзя снять роль с главного владельца из ENV OWNER_ID.")
+    tenant = await get_runtime_tenant(session)
+    owner_tg_id = await get_primary_owner_tg_id(session, tenant.id)
+    if owner_tg_id and target_id == owner_tg_id:
+        await message.answer("⛔ Нельзя снять роль с главного владельца tenant.")
         return
 
     stmt = select(User).where(User.tg_id == target_id)
@@ -225,12 +278,20 @@ async def owner_remove_owner(message: Message, session: AsyncSession) -> None:
         await message.answer("⚠️ Пользователь не найден в БД.")
         return
 
-    if normalize_role(user.role) != UserRole.OWNER.value:
+    membership = await get_membership_for_user(session, user, tenant.id)
+    if membership is None or normalize_role(membership.role) != UserRole.OWNER.value:
         await message.answer("ℹ️ У пользователя нет роли владельца.")
         return
 
-    user.role = UserRole.CLIENT.value
+    membership.role = UserRole.CLIENT.value
+    await sync_user_role_from_memberships(session, user)
     await session.commit()
+    logger.info(
+        "owner_action action=remove_owner tenant_id=%s actor_tg_id=%s target_tg_id=%s",
+        tenant.id,
+        message.from_user.id,
+        target_id,
+    )
     await message.answer(f"✅ Роль владельца снята с {target_id}.")
 
 
@@ -306,8 +367,22 @@ async def support_block_user(callback: CallbackQuery, session: AsyncSession) -> 
     if not user:
         await callback.answer("Пользователь не найден.", show_alert=True)
         return
-    user.is_blocked = True
+    tenant = await get_runtime_tenant(session)
+    membership = await get_membership_for_user(session, user, tenant.id)
+    if membership is None:
+        await callback.answer("Пользователь не состоит в текущем tenant.", show_alert=True)
+        return
+    if normalize_role(membership.role) == UserRole.OWNER.value:
+        await callback.answer("Нельзя заблокировать владельца", show_alert=True)
+        return
+    membership.is_blocked = True
     await session.commit()
+    logger.info(
+        "owner_action action=block_user_callback tenant_id=%s actor_tg_id=%s target_tg_id=%s",
+        tenant.id,
+        callback.from_user.id,
+        target_id,
+    )
     await callback.message.answer(f"⛔ Пользователь {target_id} заблокирован.")
     await callback.answer()
 
@@ -322,7 +397,18 @@ async def support_unblock_user(callback: CallbackQuery, session: AsyncSession) -
     if not user:
         await callback.answer("Пользователь не найден.", show_alert=True)
         return
-    user.is_blocked = False
+    tenant = await get_runtime_tenant(session)
+    membership = await get_membership_for_user(session, user, tenant.id)
+    if membership is None:
+        await callback.answer("Пользователь не состоит в текущем tenant.", show_alert=True)
+        return
+    membership.is_blocked = False
     await session.commit()
+    logger.info(
+        "owner_action action=unblock_user_callback tenant_id=%s actor_tg_id=%s target_tg_id=%s",
+        tenant.id,
+        callback.from_user.id,
+        target_id,
+    )
     await callback.message.answer(f"✅ Пользователь {target_id} разблокирован.")
     await callback.answer()

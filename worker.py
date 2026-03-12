@@ -28,6 +28,7 @@ from models import Order, OrderItem, Product, Brand, OrderStatus, AIChatLog
 from utils.admin_kb import admin_kb
 from utils.cards import send_product_card
 from utils.mq import send_task_to_queue
+from utils.tenants import resolve_tenant_by_bot_token
 
 QUEUE_NAME = "ai_generation"
 DLQ_QUEUE_NAME = settings.ai_dlq_queue_name
@@ -125,12 +126,19 @@ def _is_broadcast_content(text: str) -> bool:
     keywords = [
         "пост",
         "реклама",
+        "рассылка",
+        "разосл",
         "отправить",
         "клиентам",
         "поздравить",
+        "поздрав",
         "праздник",
         "акция",
         "скидка",
+        "анонс",
+        "подборка",
+        "новинк",
+        "предложен",
     ]
     return any(keyword in lowered for keyword in keywords)
 
@@ -568,6 +576,11 @@ async def _send_safe_html(
         markup = reply_markup if idx == len(parts) - 1 else None
         await bot.send_message(chat_id=chat_id, text=part, parse_mode="HTML", reply_markup=markup)
 
+
+def _has_configured_ai_key(value: str | None) -> bool:
+    normalized = (value or "").strip()
+    return bool(normalized and normalized.lower() != "disabled-placeholder")
+
 async def _resolve_ai_config() -> tuple[str, str, str, str]:
     global ai_config_cache_value, ai_config_cache_expire_at
     now = time.monotonic()
@@ -594,7 +607,7 @@ async def _resolve_ai_config() -> tuple[str, str, str, str]:
 
     data = defaults[provider]
     api_key = data["api_key"]
-    if not api_key:
+    if not _has_configured_ai_key(api_key):
         raise RuntimeError(f"{provider} API key is missing")
 
     model = (model_override or settings.ai_model or data["model"]).strip() or data["model"]
@@ -706,8 +719,10 @@ async def _publish_to_dlq(message: AbstractIncomingMessage, payload: dict, retry
 async def _persist_ai_chat_log(user_tg_id: int, user_text: str, assistant_text: str) -> None:
     try:
         async with async_session_maker() as session:
+            tenant = await resolve_tenant_by_bot_token(session, settings.bot_token)
             session.add(
                 AIChatLog(
+                    tenant_id=tenant.id,
                     user_tg_id=user_tg_id,
                     role="user",
                     content=user_text or "",
@@ -715,6 +730,7 @@ async def _persist_ai_chat_log(user_tg_id: int, user_text: str, assistant_text: 
             )
             session.add(
                 AIChatLog(
+                    tenant_id=tenant.id,
                     user_tg_id=user_tg_id,
                     role="assistant",
                     content=assistant_text or "",
@@ -740,7 +756,7 @@ async def _process_message(bot: Bot, storage: RedisStorage, message: AbstractInc
     request_id = str(payload.get("request_id") or "-")
     enqueued_at_ts = payload.get("enqueued_at_ts")
     retry_count = _get_retry_count(message)
-    is_admin = bool(payload.get("is_admin"))
+    can_broadcast_ai_posts = bool(payload.get("can_broadcast_ai_posts") or payload.get("is_admin"))
     messages_payload = payload.get("messages")
 
     if not chat_id or not messages_payload:
@@ -786,7 +802,11 @@ async def _process_message(bot: Bot, storage: RedisStorage, message: AbstractInc
 
         await _persist_ai_chat_log(int(user_id), user_text, clean_answer)
 
-        allow_broadcast = is_admin and _is_post_request(user_text)
+        allow_broadcast = can_broadcast_ai_posts and (
+            _is_post_request(user_text)
+            or _is_broadcast_content(user_text)
+            or _is_broadcast_content(clean_answer)
+        )
         reply_markup = admin_kb() if allow_broadcast else None
         await _send_safe_html(bot, int(chat_id), clean_answer, reply_markup=reply_markup)
         await _send_product_cards(bot, int(chat_id), product_ids)
@@ -863,8 +883,11 @@ async def main() -> None:
         logger.error("AI provider configuration error: %s", exc)
         sys.exit(1)
 
-    bot_id = int(settings.bot_token.split(":", 1)[0])
-    bot = Bot(token=settings.bot_token)
+    async with async_session_maker() as session:
+        tenant = await resolve_tenant_by_bot_token(session, settings.bot_token)
+    runtime_bot_token = tenant.bot_token or settings.bot_token
+    bot_id = int(runtime_bot_token.split(":", 1)[0])
+    bot = Bot(token=runtime_bot_token)
     storage = RedisStorage.from_url(settings.redis_url)
     try:
         await _consume_queue(bot, storage, bot_id)

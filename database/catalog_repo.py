@@ -33,18 +33,24 @@ def _build_sku_placeholder() -> str:
 
 
 class CatalogRepo:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, tenant_id: int | None = None) -> None:
         self.session = session
+        self.tenant_id = tenant_id
+
+    def _tenant_id(self, fallback: int | None = None) -> int | None:
+        return fallback if fallback is not None else self.tenant_id
 
     # ===== CATEGORIES =====
 
     async def get_or_create_category(self, name: str) -> Category:
         stmt = select(Category).where(Category.name == name)
+        if self.tenant_id is not None:
+            stmt = stmt.where(Category.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         category = res.scalar_one_or_none()
 
         if category is None:
-            category = Category(name=name)
+            category = Category(name=name, tenant_id=self.tenant_id)
             self.session.add(category)
             await self.session.flush()
 
@@ -52,11 +58,42 @@ class CatalogRepo:
 
     async def list_categories(self) -> Sequence[Category]:
         stmt = select(Category).order_by(Category.name)
+        if self.tenant_id is not None:
+            stmt = stmt.where(Category.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         return res.scalars().all()
 
+    async def list_categories_paginated(self, page: int, page_size: int) -> Sequence[Category]:
+        offset = max(0, (page - 1) * page_size)
+        stmt = (
+            select(Category)
+            .order_by(Category.name)
+            .limit(page_size)
+            .offset(offset)
+        )
+        if self.tenant_id is not None:
+            stmt = stmt.where(Category.tenant_id == self.tenant_id)
+        res = await self.session.execute(stmt)
+        return res.scalars().all()
+
+    async def count_categories(self) -> int:
+        stmt = select(func.count(Category.id))
+        if self.tenant_id is not None:
+            stmt = stmt.where(Category.tenant_id == self.tenant_id)
+        res = await self.session.execute(stmt)
+        return int(res.scalar() or 0)
+
+    async def get_category(self, category_id: int) -> Category | None:
+        stmt = select(Category).where(Category.id == category_id)
+        if self.tenant_id is not None:
+            stmt = stmt.where(Category.tenant_id == self.tenant_id)
+        res = await self.session.execute(stmt)
+        return res.scalar_one_or_none()
+
     async def delete_category(self, category_id: int) -> bool:
         stmt = select(Category).where(Category.id == category_id)
+        if self.tenant_id is not None:
+            stmt = stmt.where(Category.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         category = res.scalar_one_or_none()
         
@@ -70,11 +107,13 @@ class CatalogRepo:
 
     async def get_or_create_brand(self, name: str) -> Brand:
         stmt = select(Brand).where(Brand.name == name)
+        if self.tenant_id is not None:
+            stmt = stmt.where(Brand.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         brand = res.scalar_one_or_none()
 
         if brand is None:
-            brand = Brand(name=name)
+            brand = Brand(name=name, tenant_id=self.tenant_id)
             self.session.add(brand)
             await self.session.flush()
 
@@ -82,11 +121,22 @@ class CatalogRepo:
 
     async def list_brands(self) -> Sequence[Brand]:
         stmt = select(Brand).order_by(Brand.name)
+        if self.tenant_id is not None:
+            stmt = stmt.where(Brand.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         return res.scalars().all()
 
+    async def get_brand(self, brand_id: int) -> Brand | None:
+        stmt = select(Brand).where(Brand.id == brand_id)
+        if self.tenant_id is not None:
+            stmt = stmt.where(Brand.tenant_id == self.tenant_id)
+        res = await self.session.execute(stmt)
+        return res.scalar_one_or_none()
+
     async def delete_brand(self, brand_id: int) -> bool:
         stmt = select(Brand).where(Brand.id == brand_id)
+        if self.tenant_id is not None:
+            stmt = stmt.where(Brand.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         brand = res.scalar_one_or_none()
         
@@ -105,6 +155,8 @@ class CatalogRepo:
             .distinct()
             .order_by(Brand.name)
         )
+        if self.tenant_id is not None:
+            stmt = stmt.where(Brand.tenant_id == self.tenant_id, Product.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         return res.scalars().all()
 
@@ -125,6 +177,8 @@ class CatalogRepo:
             .limit(page_size)
             .offset(offset)
         )
+        if self.tenant_id is not None:
+            stmt = stmt.where(Brand.tenant_id == self.tenant_id, Product.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         return res.scalars().all()
 
@@ -135,6 +189,8 @@ class CatalogRepo:
             .join(Product, Product.brand_id == Brand.id)
             .where(Product.category_id == category_id)
         )
+        if self.tenant_id is not None:
+            stmt = stmt.where(Brand.tenant_id == self.tenant_id, Product.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         return res.scalar() or 0
 
@@ -151,6 +207,7 @@ class CatalogRepo:
         sku: str | None = None,
     ) -> Product:
         product = Product(
+            tenant_id=self._tenant_id(category.tenant_id or brand.tenant_id),
             sku=sku or _build_sku_placeholder(),
             title=title,
             purchase_price=purchase_price,
@@ -179,11 +236,15 @@ class CatalogRepo:
             )
             .order_by(Product.title)
         )
+        if self.tenant_id is not None:
+            stmt = stmt.where(Product.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         return res.scalars().all()
 
     async def delete_product(self, product_id: int) -> bool:
         stmt = select(Product).where(Product.id == product_id)
+        if self.tenant_id is not None:
+            stmt = stmt.where(Product.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         product = res.scalar_one_or_none()
         
@@ -205,6 +266,8 @@ class CatalogRepo:
             )
             .order_by(Product.id.desc())
         )
+        if self.tenant_id is not None:
+            stmt = stmt.where(Product.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         return res.scalars().all()
 
@@ -220,6 +283,8 @@ class CatalogRepo:
             )
             .where(Product.id == product_id)
         )
+        if self.tenant_id is not None:
+            stmt = stmt.where(Product.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         return res.scalar_one_or_none()
 
@@ -242,6 +307,8 @@ class CatalogRepo:
             .limit(page_size)
             .offset(offset)
         )
+        if self.tenant_id is not None:
+            stmt = stmt.where(Product.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         return res.scalars().all()
 
@@ -254,6 +321,8 @@ class CatalogRepo:
                 Product.brand_id == brand_id,
             )
         )
+        if self.tenant_id is not None:
+            stmt = stmt.where(Product.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         return res.scalar()
 
@@ -261,6 +330,7 @@ class CatalogRepo:
 
     async def add_stock(self, product: Product, size: str, quantity: int) -> ProductStock:
         stock = ProductStock(
+            tenant_id=self._tenant_id(product.tenant_id),
             product=product,
             size=size,
             quantity=quantity,
@@ -269,7 +339,7 @@ class CatalogRepo:
         await self.session.flush()
 
         if quantity > 0:
-            movement_repo = StockMovementRepo(self.session)
+            movement_repo = StockMovementRepo(self.session, tenant_id=self._tenant_id(product.tenant_id))
             await movement_repo.add_movement(
                 product_id=product.id,
                 size=size,
@@ -288,6 +358,8 @@ class CatalogRepo:
 
     async def update_product_prices(self, product_id: int, new_purchase: float, new_sale: float) -> bool:
         stmt = select(Product).where(Product.id == product_id)
+        if self.tenant_id is not None:
+            stmt = stmt.where(Product.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         product = res.scalar_one_or_none()
         
@@ -301,6 +373,8 @@ class CatalogRepo:
 
     async def update_product_description(self, product_id: int, new_desc: str) -> bool:
         stmt = select(Product).where(Product.id == product_id)
+        if self.tenant_id is not None:
+            stmt = stmt.where(Product.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         product = res.scalar_one_or_none()
         
@@ -313,6 +387,8 @@ class CatalogRepo:
 
     async def update_product_brand(self, product_id: int, brand_name: str) -> bool:
         stmt = select(Product).where(Product.id == product_id)
+        if self.tenant_id is not None:
+            stmt = stmt.where(Product.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         product = res.scalar_one_or_none()
 
@@ -334,10 +410,14 @@ class CatalogRepo:
             ProductStock.product_id == product_id,
             ProductStock.size == size
         )
+        if self.tenant_id is not None:
+            stmt = stmt.where(ProductStock.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         stock = res.scalar_one_or_none()
 
         stmt_prod = select(Product).where(Product.id == product_id)
+        if self.tenant_id is not None:
+            stmt_prod = stmt_prod.where(Product.tenant_id == self.tenant_id)
         res_prod = await self.session.execute(stmt_prod)
         product = res_prod.scalar_one_or_none()
 
@@ -349,12 +429,17 @@ class CatalogRepo:
             stock.quantity = new_quantity
         else:
             if new_quantity > 0:
-                new_stock = ProductStock(product_id=product.id, size=size, quantity=new_quantity)
+                new_stock = ProductStock(
+                    tenant_id=self._tenant_id(product.tenant_id),
+                    product_id=product.id,
+                    size=size,
+                    quantity=new_quantity,
+                )
                 self.session.add(new_stock)
 
         delta = new_quantity - old_quantity
         if delta != 0:
-            movement_repo = StockMovementRepo(self.session)
+            movement_repo = StockMovementRepo(self.session, tenant_id=self._tenant_id(product.tenant_id))
             direction = MovementDirection.IN if delta > 0 else MovementDirection.OUT
             operation_type = MovementOperation.MANUAL_ADD if delta > 0 else MovementOperation.MANUAL_WRITE_OFF
             await movement_repo.add_movement(
@@ -377,21 +462,40 @@ class CatalogRepo:
 
     async def count_photos_for_product(self, product_id: int) -> int:
         stmt = select(func.count(Photo.id)).where(Photo.product_id == product_id)
+        if self.tenant_id is not None:
+            stmt = stmt.where(Photo.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         return int(res.scalar_one())
 
-    async def add_photo(self, product: Product, file_id: str, max_photos: int = 10) -> Photo:
+    async def add_photo(
+        self,
+        product: Product,
+        file_id: str,
+        max_photos: int = 10,
+        media_type: str = "photo",
+    ) -> Photo:
         count = await self.count_photos_for_product(product.id)
         if count >= max_photos:
-            raise ValueError(f"Превышен лимит фото ({max_photos}) для модели")
+            raise ValueError(f"Превышен лимит медиа ({max_photos}) для модели")
 
-        photo = Photo(product=product, file_id=file_id)
+        normalized_media_type = (media_type or "photo").strip().lower()
+        if normalized_media_type not in {"photo", "video"}:
+            raise ValueError("Unsupported media type")
+
+        photo = Photo(
+            product=product,
+            file_id=file_id,
+            tenant_id=self._tenant_id(product.tenant_id),
+            media_type=normalized_media_type,
+        )
         self.session.add(photo)
         await self.session.flush()
         return photo
 
     async def delete_photo(self, photo_id: int) -> bool:
         stmt = select(Photo).where(Photo.id == photo_id)
+        if self.tenant_id is not None:
+            stmt = stmt.where(Photo.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         photo = res.scalar_one_or_none()
         if not photo:
@@ -409,6 +513,8 @@ class CatalogRepo:
             .options(selectinload(Product.stock))
             .where(Product.category_id == category_id)
         )
+        if self.tenant_id is not None:
+            stmt = stmt.where(Product.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         products = res.scalars().all()
         
@@ -435,6 +541,8 @@ class CatalogRepo:
             .options(selectinload(Product.stock))
             .where(and_(*conditions))
         )
+        if self.tenant_id is not None:
+            stmt = stmt.where(Product.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         products = res.scalars().all()
         
@@ -459,6 +567,8 @@ class CatalogRepo:
             .order_by(func.sum(ProductStock.quantity))
             .limit(limit)
         )
+        if self.tenant_id is not None:
+            stmt = stmt.where(Product.tenant_id == self.tenant_id, ProductStock.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         return res.scalars().all()
 
@@ -470,6 +580,8 @@ class CatalogRepo:
             .order_by((Product.sale_price - Product.purchase_price).desc())
             .limit(limit)
         )
+        if self.tenant_id is not None:
+            stmt = stmt.where(Product.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         return res.scalars().all()
 
@@ -482,6 +594,14 @@ class CatalogRepo:
             .group_by(Product.id)
             .having(func.coalesce(func.sum(ProductStock.quantity), 0) == 0)
         ).alias("zero_products")
+        if self.tenant_id is not None:
+            subq = (
+                select(Product.id)
+                .join(ProductStock, isouter=True)
+                .where(Product.tenant_id == self.tenant_id)
+                .group_by(Product.id)
+                .having(func.coalesce(func.sum(ProductStock.quantity), 0) == 0)
+            ).alias("zero_products")
         
         stmt = (
             select(Product)
@@ -490,6 +610,8 @@ class CatalogRepo:
             .order_by(Product.id.desc())
             .limit(limit)
         )
+        if self.tenant_id is not None:
+            stmt = stmt.where(Product.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         return res.scalars().all()
 
@@ -503,6 +625,8 @@ class CatalogRepo:
             .order_by(Product.created_at.desc())
             .limit(limit)
         )
+        if self.tenant_id is not None:
+            stmt = stmt.where(Product.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         return res.scalars().all()
 
@@ -510,6 +634,8 @@ class CatalogRepo:
         """Считает товары, добавленные за последние N дней."""
         cutoff_date = datetime.utcnow() - timedelta(days=days)
         stmt = select(func.count(Product.id)).where(Product.created_at >= cutoff_date)
+        if self.tenant_id is not None:
+            stmt = stmt.where(Product.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         return int(res.scalar() or 0)
 

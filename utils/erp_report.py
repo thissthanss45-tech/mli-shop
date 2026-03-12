@@ -11,6 +11,55 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models import Brand, Order, OrderItem, OrderStatus, Product, ProductStock, StockMovement
 
 
+def _movement_operation_label(operation_type: str) -> str:
+    raw_value = getattr(operation_type, "value", operation_type)
+    mapping = {
+        "sale": "Продали товар",
+        "manual_add": "Добавили на склад",
+        "manual_write_off": "Убрали со склада",
+        "return": "Вернули на склад",
+        "correction": "Исправили остаток",
+    }
+    normalized = (raw_value or "").strip().lower()
+    return mapping.get(normalized, raw_value or "")
+
+
+def _movement_delta_value(direction: str, quantity: int) -> str:
+    raw_value = getattr(direction, "value", direction)
+    sign = "+" if raw_value == "in" else "-"
+    return f"{sign}{int(quantity)}"
+
+
+def _movement_comment_text(note: str | None, operation_type: str, order_id: int | None) -> str:
+    cleaned_note = (note or "").strip()
+    raw_value = getattr(operation_type, "value", operation_type)
+    if cleaned_note:
+        return cleaned_note
+    if order_id and raw_value == "sale":
+        return f"Заказ №{order_id}"
+    if order_id and raw_value == "return":
+        return f"Возврат по заказу №{order_id}"
+    if raw_value == "manual_add":
+        return "Товар пришёл в магазин"
+    if raw_value == "manual_write_off":
+        return "Товар списали вручную"
+    if raw_value == "correction":
+        return "Остаток исправлен вручную"
+    return "Без комментария"
+
+
+def _movement_product_label(brand_name: str | None, product_title: str | None) -> str:
+    title = (product_title or "").strip()
+    brand = (brand_name or "").strip()
+    if brand and title:
+        return f"{brand} / {title}"
+    if title:
+        return title
+    if brand:
+        return brand
+    return "Товар не указан"
+
+
 def _autosize_columns(ws) -> None:
     for column_cells in ws.columns:
         max_len = 0
@@ -187,21 +236,13 @@ async def build_erp_report_xlsx(
 
     movement_data = []
     for row in movement_rows:
-        direction_label = "Пришло" if row.direction == "in" else "Ушло"
         movement_data.append(
             {
-                "Дата": row.created_at.strftime("%d.%m.%Y %H:%M"),
-                "Направление": direction_label,
-                "Операция": row.operation_type,
-                "Заказ": row.order_id or "-",
-                "SKU": row.sku,
-                "Бренд": row.brand,
-                "Товар": row.title,
-                "Размер": row.size,
-                "Количество": int(row.quantity),
-                "Было": int(row.stock_before),
-                "Стало": int(row.stock_after),
-                "Комментарий": row.note or "",
+                "Когда": row.created_at.strftime("%d.%m.%Y %H:%M"),
+                "Товар": _movement_product_label(row.brand, row.title),
+                "Что произошло": _movement_operation_label(row.operation_type),
+                "Сколько": _movement_delta_value(row.direction, row.quantity),
+                "Комментарий": _movement_comment_text(row.note, row.operation_type, row.order_id),
             }
         )
 
@@ -209,18 +250,11 @@ async def build_erp_report_xlsx(
         for sale in sales_data:
             movement_data.append(
                 {
-                    "Дата": sale["Дата"],
-                    "Направление": "Ушло",
-                    "Операция": "sale",
-                    "Заказ": sale["Заказ"],
-                    "SKU": sale["SKU"],
-                    "Бренд": sale["Бренд"],
-                    "Товар": sale["Товар"],
-                    "Размер": sale["Размер"],
-                    "Количество": sale["Кол-во"],
-                    "Было": "-",
-                    "Стало": "-",
-                    "Комментарий": "Синтетическая запись: продажа из истории заказов",
+                    "Когда": sale["Дата"],
+                    "Товар": _movement_product_label(sale["Бренд"], sale["Товар"]),
+                    "Что произошло": "Продали товар",
+                    "Сколько": f"-{sale['Кол-во']}",
+                    "Комментарий": f"Заказ №{sale['Заказ']}",
                 }
             )
 
@@ -278,7 +312,7 @@ async def build_erp_report_xlsx(
         ])
     if movement_df.empty:
         movement_df = pd.DataFrame(columns=[
-            "Дата", "Направление", "Операция", "Заказ", "SKU", "Бренд", "Товар", "Размер", "Количество", "Было", "Стало", "Комментарий"
+            "Когда", "Товар", "Что произошло", "Сколько", "Комментарий"
         ])
 
     output = BytesIO()
@@ -296,12 +330,14 @@ async def build_erp_report_xlsx(
             _style_sheet_header(ws)
             _autosize_columns(ws)
 
+        ws_mov.auto_filter.ref = ws_mov.dimensions
+
         if ws_mov.max_row > 1:
             in_fill = PatternFill(start_color="E2F0D9", end_color="E2F0D9", fill_type="solid")
             out_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
             for row_idx in range(2, ws_mov.max_row + 1):
-                direction_value = ws_mov.cell(row=row_idx, column=2).value
-                fill = in_fill if direction_value == "Пришло" else out_fill
+                delta_value = str(ws_mov.cell(row=row_idx, column=4).value or "")
+                fill = in_fill if delta_value.startswith("+") else out_fill
                 for col_idx in range(1, ws_mov.max_column + 1):
                     ws_mov.cell(row=row_idx, column=col_idx).fill = fill
 

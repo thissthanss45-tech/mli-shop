@@ -79,6 +79,18 @@
     const refreshBtn = document.getElementById('refresh');
     const cartCount = document.getElementById('cart-count');
 
+    function renderMediaMarkup(item, className = 'card__image') {
+      const url = item.primary_media_url || item.image_url;
+      const type = item.primary_media_type || 'photo';
+      if (!url) {
+        return `<img class="${className}" src="/web/no-image.svg" alt="Нет медиа" loading="lazy" />`;
+      }
+      if (type === 'video') {
+        return `<video class="${className}" src="${url}" muted playsinline preload="metadata"></video>`;
+      }
+      return `<img class="${className}" src="${url}" alt="Фото товара" loading="lazy" />`;
+    }
+
     function readCart() {
       try {
         const raw = localStorage.getItem('mli_cart') || '[]';
@@ -106,6 +118,9 @@
           brand_id: item.brand_id,
           brand_name: item.brand_name,
           image_url: item.image_url,
+          primary_media_url: item.primary_media_url,
+          primary_media_type: item.primary_media_type,
+          media: item.media || [],
         });
         writeCart(cart);
       }
@@ -134,11 +149,13 @@
           ? `Бренд: ${item.brand_name}`
           : `Бренд #${item.brand_id ?? '—'}`;
         node.querySelector('.tag--stock').textContent = `В наличии: ${item.stock}`;
-        const image = node.querySelector('.card__image');
-        image.src = item.image_url || '/web/no-image.svg';
-        image.onerror = () => {
-          image.src = '/web/no-image.svg';
-        };
+        node.querySelector('.card__image').outerHTML = renderMediaMarkup(item);
+        const image = node.querySelector('img.card__image');
+        if (image) {
+          image.onerror = () => {
+            image.src = '/web/no-image.svg';
+          };
+        }
         node.querySelector('.card__more').href = `/product/${item.id}`;
         node.querySelector('.card__buy').addEventListener('click', () => {
           addToCart(item);

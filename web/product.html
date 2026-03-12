@@ -59,9 +59,22 @@
           brand_id: item.brand_id,
           brand_name: item.brand_name,
           image_url: item.image_url,
+          primary_media_url: item.primary_media_url,
+          primary_media_type: item.primary_media_type,
+          media: item.media || [],
         });
         localStorage.setItem('mli_cart', JSON.stringify(cart));
       }
+    }
+
+    function renderMediaItem(media, className = 'card__image card__image--detail') {
+      if (!media || !media.url) {
+        return `<img class="${className}" src="/web/no-image.svg" alt="Нет медиа" loading="lazy" />`;
+      }
+      if (media.media_type === 'video') {
+        return `<video class="${className}" src="${media.url}" controls playsinline preload="metadata"></video>`;
+      }
+      return `<img class="${className}" src="${media.url}" alt="Фото товара" loading="lazy" />`;
     }
 
     function getProductIdFromPath() {
@@ -77,9 +90,15 @@
 
     function renderProduct(item) {
       const wrap = document.getElementById('product-wrap');
+      const media = Array.isArray(item.media) ? item.media : [];
+      const primary = media.find((entry) => entry.is_primary) || media[0] || null;
+      const gallery = media.length > 1
+        ? `<div class="media-strip">${media.map((entry, index) => `<button class="media-thumb ${entry.is_primary ? 'media-thumb--active' : ''}" type="button" data-media-index="${index}">${entry.media_type === 'video' ? 'Видео' : 'Фото'} ${index + 1}</button>`).join('')}</div>`
+        : '';
       wrap.innerHTML = `
         <article class="card card--product">
-          <img class="card__image card__image--detail" src="${item.image_url || '/web/no-image.svg'}" alt="Фото товара" loading="lazy" />
+          <div id="product-media">${renderMediaItem(primary)}</div>
+          ${gallery}
           <div class="card__top">
             <h2 class="card__title">${item.name}</h2>
             <span class="card__price">${formatPrice(item.price)}</span>
@@ -99,10 +118,15 @@
         </article>
       `;
 
-      const image = wrap.querySelector('.card__image');
-      image.onerror = () => {
-        image.src = '/web/no-image.svg';
-      };
+      wrap.querySelectorAll('[data-media-index]').forEach((button) => {
+        button.addEventListener('click', () => {
+          const index = Number(button.dataset.mediaIndex);
+          const current = media[index] || primary;
+          wrap.querySelector('#product-media').innerHTML = renderMediaItem(current);
+          wrap.querySelectorAll('.media-thumb').forEach((thumb) => thumb.classList.remove('media-thumb--active'));
+          button.classList.add('media-thumb--active');
+        });
+      });
 
       wrap.querySelector('#buy-btn').addEventListener('click', () => {
         addToCart(item);

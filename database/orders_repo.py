@@ -17,8 +17,18 @@ logger = logging.getLogger(__name__)
 
 
 class OrdersRepo:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, tenant_id: int | None = None) -> None:
         self.session = session
+        self.tenant_id = tenant_id
+
+    def _tenant_id(self, user: User | None = None, product: Product | None = None) -> int | None:
+        if self.tenant_id is not None:
+            return self.tenant_id
+        if user is not None and user.tenant_id is not None:
+            return user.tenant_id
+        if product is not None and product.tenant_id is not None:
+            return product.tenant_id
+        return None
 
     # ===== CART (КОРЗИНА) =====
 
@@ -36,6 +46,9 @@ class OrdersRepo:
             CartItem.product_id == product.id,
             CartItem.size == size
         )
+        active_tenant_id = self._tenant_id(user=user, product=product)
+        if active_tenant_id is not None:
+            stmt = stmt.where(CartItem.tenant_id == active_tenant_id)
         res = await self.session.execute(stmt)
         existing = res.scalar_one_or_none()
         
@@ -44,6 +57,7 @@ class OrdersRepo:
             item = existing
         else:
             item = CartItem(
+                tenant_id=active_tenant_id,
                 user=user,
                 product=product,
                 size=size,
@@ -66,6 +80,9 @@ class OrdersRepo:
             .where(CartItem.user_id == user.id)
             .order_by(CartItem.created_at.desc())
         )
+        active_tenant_id = self._tenant_id(user=user)
+        if active_tenant_id is not None:
+            stmt = stmt.where(CartItem.tenant_id == active_tenant_id)
         res = await self.session.execute(stmt)
         return res.scalars().all()
 
@@ -75,6 +92,9 @@ class OrdersRepo:
             select(func.sum(CartItem.quantity * CartItem.price_at_add))
             .where(CartItem.user_id == user.id)
         )
+        active_tenant_id = self._tenant_id(user=user)
+        if active_tenant_id is not None:
+            stmt = stmt.where(CartItem.tenant_id == active_tenant_id)
         res = await self.session.execute(stmt)
         total = res.scalar_one()
         return float(total) if total else 0.0
@@ -85,6 +105,9 @@ class OrdersRepo:
             CartItem.id == item_id,
             CartItem.user_id == user.id
         )
+        active_tenant_id = self._tenant_id(user=user)
+        if active_tenant_id is not None:
+            stmt = stmt.where(CartItem.tenant_id == active_tenant_id)
         res = await self.session.execute(stmt)
         item = res.scalar_one_or_none()
         
@@ -94,9 +117,53 @@ class OrdersRepo:
             return True
         return False
 
+    async def change_cart_item_quantity(
+        self,
+        user: User,
+        item_id: int,
+        delta: int,
+    ) -> tuple[str, CartItem | None, int | None]:
+        """Изменение количества позиции в корзине на заданный шаг."""
+        stmt = select(CartItem).where(
+            CartItem.id == item_id,
+            CartItem.user_id == user.id,
+        )
+        active_tenant_id = self._tenant_id(user=user)
+        if active_tenant_id is not None:
+            stmt = stmt.where(CartItem.tenant_id == active_tenant_id)
+        res = await self.session.execute(stmt)
+        item = res.scalar_one_or_none()
+
+        if item is None:
+            return "not_found", None, None
+
+        new_quantity = int(item.quantity) + int(delta)
+        if new_quantity < 1:
+            return "min_reached", item, None
+
+        stock_stmt = select(ProductStock).where(
+            ProductStock.product_id == item.product_id,
+            ProductStock.size == item.size,
+        )
+        if active_tenant_id is not None:
+            stock_stmt = stock_stmt.where(ProductStock.tenant_id == active_tenant_id)
+        stock_res = await self.session.execute(stock_stmt)
+        stock = stock_res.scalar_one_or_none()
+        available_quantity = int(stock.quantity) if stock else 0
+
+        if new_quantity > available_quantity:
+            return "stock_limit", item, available_quantity
+
+        item.quantity = new_quantity
+        await self.session.flush()
+        return "updated", item, available_quantity
+
     async def clear_cart(self, user: User) -> None:
         """Очистка корзины пользователя."""
         stmt = delete(CartItem).where(CartItem.user_id == user.id)
+        active_tenant_id = self._tenant_id(user=user)
+        if active_tenant_id is not None:
+            stmt = stmt.where(CartItem.tenant_id == active_tenant_id)
         await self.session.execute(stmt)
         await self.session.flush()
 
@@ -132,6 +199,8 @@ class OrdersRepo:
                 )
                 .with_for_update()
             )
+            if self.tenant_id is not None:
+                stock_stmt = stock_stmt.where(ProductStock.tenant_id == self.tenant_id)
             stock_res = await self.session.execute(stock_stmt)
             stock = stock_res.scalar_one_or_none()
             available = int(stock.quantity) if stock else 0
@@ -144,6 +213,7 @@ class OrdersRepo:
 
         # Создаем заказ
         order = Order(
+            tenant_id=self._tenant_id(user=user),
             user=user,
             full_name=full_name,
             phone=phone,
@@ -155,9 +225,10 @@ class OrdersRepo:
         await self.session.flush()  # Получаем ID заказа
 
         # Создаем позиции заказа и списываем остатки
-        movement_repo = StockMovementRepo(self.session)
+        movement_repo = StockMovementRepo(self.session, tenant_id=self._tenant_id(user=user))
         for item in cart_items:
             order_item = OrderItem(
+            tenant_id=self._tenant_id(user=user),
                 order=order,
                 product_id=item.product.id,
                 size=item.size,
@@ -199,6 +270,8 @@ class OrdersRepo:
             .where(Order.status == OrderStatus.NEW.value)
             .order_by(Order.created_at.desc())
         )
+        if self.tenant_id is not None:
+            stmt = stmt.where(Order.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         return res.scalars().all()
 
@@ -210,6 +283,8 @@ class OrdersRepo:
     ) -> Sequence[Order]:
         """Получение заказов по списку статусов с товарами."""
         conditions = [Order.status.in_(list(statuses))]
+        if self.tenant_id is not None:
+            conditions.append(Order.tenant_id == self.tenant_id)
         if start_date and end_date:
             conditions.append(Order.created_at.between(start_date, end_date))
         elif start_date:
@@ -238,6 +313,8 @@ class OrdersRepo:
     ) -> Sequence[Order]:
         """Получение заказов по статусам с пагинацией и фильтром по дате."""
         conditions = [Order.status.in_(list(statuses))]
+        if self.tenant_id is not None:
+            conditions.append(Order.tenant_id == self.tenant_id)
         if start_date and end_date:
             conditions.append(Order.created_at.between(start_date, end_date))
         elif start_date:
@@ -266,6 +343,8 @@ class OrdersRepo:
     ) -> int:
         """Количество заказов по статусам с фильтром по дате."""
         conditions = [Order.status.in_(list(statuses))]
+        if self.tenant_id is not None:
+            conditions.append(Order.tenant_id == self.tenant_id)
         if start_date and end_date:
             conditions.append(Order.created_at.between(start_date, end_date))
         elif start_date:
@@ -284,6 +363,8 @@ class OrdersRepo:
             .where(Order.id == order_id)
             .values(status=new_status)
         )
+        if self.tenant_id is not None:
+            stmt = stmt.where(Order.tenant_id == self.tenant_id)
         result = await self.session.execute(stmt)
         await self.session.flush()
         return result.rowcount > 0
@@ -293,6 +374,8 @@ class OrdersRepo:
         stmt = select(Order).where(Order.id == order_id).options(
             selectinload(Order.items)
         )
+        if self.tenant_id is not None:
+            stmt = stmt.where(Order.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         order = res.scalar_one_or_none()
         
@@ -300,12 +383,14 @@ class OrdersRepo:
             return False
 
         # Возвращаем товары на склад
-        movement_repo = StockMovementRepo(self.session)
+        movement_repo = StockMovementRepo(self.session, tenant_id=self.tenant_id or order.tenant_id)
         for item in order.items:
             stmt = select(ProductStock).where(
                 ProductStock.product_id == item.product_id,
                 ProductStock.size == item.size
             )
+            if self.tenant_id is not None:
+                stmt = stmt.where(ProductStock.tenant_id == self.tenant_id)
             res = await self.session.execute(stmt)
             stock = res.scalar_one_or_none()
             
@@ -316,6 +401,7 @@ class OrdersRepo:
             else:
                 # Если записи о размере не было, создаем новую
                 new_stock = ProductStock(
+                    tenant_id=self.tenant_id or order.tenant_id,
                     product_id=item.product_id,
                     size=item.size,
                     quantity=item.quantity
@@ -358,6 +444,8 @@ class OrdersRepo:
             )
             .order_by(Order.created_at.desc())
         )
+        if self.tenant_id is not None:
+            stmt = stmt.where(Order.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         return res.scalars().all()
 
@@ -375,6 +463,8 @@ class OrdersRepo:
             )
             .order_by(Order.created_at.desc())
         )
+        if self.tenant_id is not None:
+            stmt = stmt.where(Order.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         return res.scalars().all()
 
@@ -393,6 +483,8 @@ class OrdersRepo:
                     Order.status == OrderStatus.COMPLETED.value,
                 )
             )
+            if self.tenant_id is not None:
+                orders_stmt = orders_stmt.where(Order.tenant_id == self.tenant_id)
             res = await self.session.execute(orders_stmt)
             row = res.first()
             count = int(row.count) if row and row.count is not None else 0
@@ -407,6 +499,12 @@ class OrdersRepo:
                     Order.status == OrderStatus.COMPLETED.value,
                 )
             )
+            if self.tenant_id is not None:
+                cost_stmt = cost_stmt.where(
+                    Order.tenant_id == self.tenant_id,
+                    OrderItem.tenant_id == self.tenant_id,
+                    Product.tenant_id == self.tenant_id,
+                )
             cost_res = await self.session.execute(cost_stmt)
             cost = float(cost_res.scalar_one() or 0.0)
 
@@ -435,6 +533,12 @@ class OrdersRepo:
             .order_by(func.sum(OrderItem.quantity).desc())
             .limit(limit)
         )
+        if self.tenant_id is not None:
+            stmt = stmt.where(
+                Order.tenant_id == self.tenant_id,
+                OrderItem.tenant_id == self.tenant_id,
+                Product.tenant_id == self.tenant_id,
+            )
         res = await self.session.execute(stmt)
         return res.all()
 
@@ -446,6 +550,8 @@ class OrdersRepo:
             .where(Order.status == OrderStatus.COMPLETED.value)
             .group_by(OrderItem.product_id)
         )
+        if self.tenant_id is not None:
+            stmt = stmt.where(Order.tenant_id == self.tenant_id, OrderItem.tenant_id == self.tenant_id)
         res = await self.session.execute(stmt)
         return {row.product_id: row.sold for row in res.all()}
 
@@ -464,6 +570,12 @@ class OrdersRepo:
             )
             .order_by(Order.created_at.desc())
         )
+        if self.tenant_id is not None:
+            stmt = stmt.where(
+                Order.tenant_id == self.tenant_id,
+                OrderItem.tenant_id == self.tenant_id,
+                Product.tenant_id == self.tenant_id,
+            )
         
         res = await self.session.execute(stmt)
         rows = res.all()

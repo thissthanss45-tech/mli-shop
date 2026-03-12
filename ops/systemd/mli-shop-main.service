@@ -1,0 +1,18 @@
+[Unit]
+Description=MLI Shop Main Stack
+After=network-online.target docker.service
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/mli_shop_project
+Environment=ENV_FILE=.env
+ExecStart=/usr/bin/docker compose --env-file .env up -d db redis rabbitmq web_api worker bot nginx
+ExecStop=/usr/bin/docker compose --env-file .env stop nginx bot worker web_api rabbitmq redis db
+ExecReload=/usr/bin/docker compose --env-file .env up -d db redis rabbitmq web_api worker bot nginx
+RemainAfterExit=yes
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

@@ -16,8 +16,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
 from database.orders_repo import OrdersRepo
-from models import User
+from models import User, UserRole
 from models.orders import OrderStatus
+from utils.tenants import get_runtime_tenant_role_for_tg_id
 from ..owner_states import OrderHistoryStates
 from ..owner_utils import owner_only
 from utils.admin_kb import build_active_order_kb
@@ -119,7 +120,8 @@ async def _render_orders_history(
     requester_user_id: int | None = None,
 ) -> None:
     actor_id = requester_user_id if requester_user_id is not None else message.from_user.id
-    is_owner = actor_id == settings.owner_id
+    role = await get_runtime_tenant_role_for_tg_id(session, actor_id)
+    is_owner = role == UserRole.OWNER.value
 
     now_dt = datetime.now()
     today_start = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -339,7 +341,10 @@ async def owner_active_orders(message: Message, session: AsyncSession) -> None:
 
         try:
             await message.answer(card_text, reply_markup=markup, parse_mode="HTML")
-        except TelegramBadRequest:
+        except TelegramBadRequest as exc:
+            fallback_markup = markup
+            if user_tg_id and not is_web_order and "BUTTON_USER_PRIVACY_RESTRICTED" in str(exc):
+                fallback_markup = build_active_order_kb(order.id, user_tg_id, sku_items, include_profile_button=False)
             fallback_text = (
                 f"Заказ #{order.id}\n"
                 f"Клиент: {order.full_name}\n"
@@ -347,7 +352,7 @@ async def owner_active_orders(message: Message, session: AsyncSession) -> None:
                 f"Сумма: {total_fmt} ₽\n"
                 f"Состав заказа:\n{items_text}"
             )
-            await message.answer(fallback_text, reply_markup=markup)
+            await message.answer(fallback_text, reply_markup=fallback_markup)
 
 
 @main_router.message(F.text == "✅ История заказов")

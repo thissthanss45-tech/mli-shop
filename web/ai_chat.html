@@ -132,6 +132,9 @@
             brand_id: item.brand_id,
             brand_name: item.brand_name,
             image_url: item.image_url,
+            primary_media_url: item.primary_media_url,
+            primary_media_type: item.primary_media_type,
+            media: item.media || [],
           });
           writeCart(cart);
         } else {

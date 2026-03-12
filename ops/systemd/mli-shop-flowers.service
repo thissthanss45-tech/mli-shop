@@ -1,0 +1,18 @@
+[Unit]
+Description=MLI Shop Flowers Stack
+After=network-online.target docker.service
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/mli_shop_project
+Environment=ENV_FILE=.env.flowers-shop
+ExecStart=/usr/bin/docker compose --env-file .env.flowers-shop -p mli-shop-flowers up -d db redis rabbitmq web_api worker bot
+ExecStop=/usr/bin/docker compose --env-file .env.flowers-shop -p mli-shop-flowers stop bot worker web_api rabbitmq redis db
+ExecReload=/usr/bin/docker compose --env-file .env.flowers-shop -p mli-shop-flowers up -d db redis rabbitmq web_api worker bot
+RemainAfterExit=yes
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

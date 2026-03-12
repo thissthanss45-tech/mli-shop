@@ -11,6 +11,7 @@ from redis.asyncio import Redis
 
 from config import settings
 from models import User, UserRole, AIChatLog
+from utils.tenants import ensure_tenant_membership, get_runtime_tenant, is_runtime_owner, sync_user_role_from_memberships
 
 admin_router = Router()
 logger = logging.getLogger(__name__)
@@ -58,7 +59,7 @@ async def set_staff_role(message: Message, session: AsyncSession):
     Команда: /set_seller 123456789
     Назначает пользователя Сотрудником (STAFF).
     """
-    if message.from_user.id != settings.owner_id:
+    if not await is_runtime_owner(session, message.from_user.id):
         return
 
     try:
@@ -77,8 +78,19 @@ async def set_staff_role(message: Message, session: AsyncSession):
             await message.answer("⚠️ Этот пользователь не найден в базе.\nПусть он сначала нажмет /start в боте.")
             return
             
-        user.role = UserRole.STAFF.value
+        tenant = await get_runtime_tenant(session)
+        membership = await ensure_tenant_membership(session, user, tenant.id, UserRole.STAFF.value)
+        membership.role = UserRole.STAFF.value
+        if user.tenant_id is None:
+            user.tenant_id = tenant.id
+        await sync_user_role_from_memberships(session, user)
         await session.commit()
+        logger.info(
+            "owner_action action=set_seller tenant_id=%s actor_tg_id=%s target_tg_id=%s",
+            tenant.id,
+            message.from_user.id,
+            target_id,
+        )
         
         await message.answer(
             f"✅ <b>Успешно!</b>\n"
@@ -103,8 +115,8 @@ async def set_staff_role(message: Message, session: AsyncSession):
 
 
 @admin_router.message(F.text.startswith("/ai_provider"))
-async def set_ai_provider(message: Message) -> None:
-    if message.from_user.id != settings.owner_id:
+async def set_ai_provider(message: Message, session: AsyncSession) -> None:
+    if not await is_runtime_owner(session, message.from_user.id):
         return
 
     parts = message.text.split()
@@ -167,7 +179,7 @@ async def set_ai_provider(message: Message) -> None:
 
 @admin_router.message(F.text.startswith("/ai_audit"))
 async def export_ai_audit(message: Message, session: AsyncSession) -> None:
-    if message.from_user.id != settings.owner_id:
+    if not await is_runtime_owner(session, message.from_user.id):
         return
 
     stmt = (

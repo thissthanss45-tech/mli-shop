@@ -4,7 +4,7 @@ import asyncio
 from typing import Any, Dict, List
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message, CallbackQuery, InputMediaPhoto, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder 
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,7 +12,9 @@ from sqlalchemy import select
 
 from database.catalog_repo import CatalogRepo
 from models.catalog import Category, Brand, Product
-from models.users import User, UserRole, normalize_role
+from models.users import User, UserRole
+from utils.product_media import build_product_media_group, describe_media_item, normalize_media_type
+from utils.tenants import get_runtime_tenant, get_runtime_tenant_role_for_tg_id, list_tenant_recipient_ids
 
 from .owner_states import (
     AddProductStates,
@@ -66,10 +68,8 @@ async def _show_products_menu(message: Message) -> None:
 
 
 async def _maybe_show_staff_menu(message: Message, session: AsyncSession) -> bool:
-    stmt = select(User).where(User.tg_id == message.from_user.id)
-    res = await session.execute(stmt)
-    user = res.scalar_one_or_none()
-    if user and normalize_role(user.role) == UserRole.STAFF.value:
+    role = await get_runtime_tenant_role_for_tg_id(session, message.from_user.id)
+    if role == UserRole.STAFF.value:
         kb = ReplyKeyboardMarkup(
             keyboard=[
                 [KeyboardButton(text="🛍 Каталог"), KeyboardButton(text="📋 Заказы")],
@@ -84,6 +84,35 @@ async def _maybe_show_staff_menu(message: Message, session: AsyncSession) -> boo
 
 def _is_staff_menu_text(text: str) -> bool:
     return text in {"🛍 Каталог", "📋 Заказы", "💳 Касса"}
+
+
+async def _send_product_media_preview(
+    message: Message,
+    media_items: list[Any],
+    caption: str,
+    reply_markup: Any | None = None,
+) -> None:
+    if not media_items:
+        await message.answer(caption, reply_markup=reply_markup, parse_mode="HTML")
+        return
+
+    if len(media_items) > 1:
+        album = build_product_media_group(media_items, caption)
+        await message.answer_media_group(media=album.build())
+        if reply_markup is not None:
+            await message.answer("👇 Действия:", reply_markup=reply_markup)
+        return
+
+    media = media_items[0]
+    if normalize_media_type(getattr(media, "media_type", None)) == "video":
+        await message.answer_video(media.file_id, caption=caption, reply_markup=reply_markup, parse_mode="HTML")
+    else:
+        await message.answer_photo(media.file_id, caption=caption, reply_markup=reply_markup, parse_mode="HTML")
+
+
+async def _get_catalog_repo(session: AsyncSession) -> CatalogRepo:
+    tenant = await get_runtime_tenant(session)
+    return CatalogRepo(session, tenant_id=tenant.id)
 
 
 # ==========================================
@@ -132,17 +161,17 @@ async def owner_add_category_name(
     # Обработка кнопок меню (если передумал)
     if _is_cancel_or_back_text(name):
         await state.clear()
-        await owner_menu_products(message, state)
+        await owner_menu_products(message, state, session)
         return
 
     # Переключение на другие функции
     if name == "➕ Добавить бренд":
         await state.clear()
-        await owner_add_brand_start(message, state)
+        await owner_add_brand_start(message, state, session)
         return
     if name == "➕ Добавить товар":
         await state.clear()
-        await owner_menu_products(message, state)
+        await owner_menu_products(message, state, session)
         return
 
     # Защита от названий кнопок
@@ -154,13 +183,13 @@ async def owner_add_category_name(
         await message.answer("Название категории не может быть пустым. Введи ещё раз:", reply_markup=cancel_kb())
         return
 
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     await repo.get_or_create_category(name=name)
     await session.commit()
 
     await state.clear()
     await message.answer(f"✅ Категория «{name}» добавлена.")
-    await owner_menu_products(message, state)
+    await owner_menu_products(message, state, session)
 
 
 # ==========================================
@@ -195,17 +224,17 @@ async def owner_add_brand_name(
     # Обработка кнопок меню
     if _is_cancel_or_back_text(name):
         await state.clear()
-        await owner_menu_products(message, state)
+        await owner_menu_products(message, state, session)
         return
 
     # Переключение на другие функции
     if name == "➕ Добавить категорию":
         await state.clear()
-        await owner_add_category_start(message, state)
+        await owner_add_category_start(message, state, session)
         return
     if name == "➕ Добавить товар":
         await state.clear()
-        await owner_menu_products(message, state)
+        await owner_menu_products(message, state, session)
         return
 
     # Защита от названий кнопок
@@ -217,13 +246,13 @@ async def owner_add_brand_name(
         await message.answer("Название бренда не может быть пустым. Введи ещё раз:", reply_markup=cancel_kb())
         return
 
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     await repo.get_or_create_brand(name=name)
     await session.commit()
 
     await state.clear()
     await message.answer(f"✅ Бренд «{name}» добавлен.")
-    await owner_menu_products(message, state)
+    await owner_menu_products(message, state, session)
 
 
 # ==========================================
@@ -238,7 +267,7 @@ async def owner_add_product_start(
     session: AsyncSession,
 ) -> None:
     """Начало добавления товара."""
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     categories = await repo.list_categories()
 
     if not categories:
@@ -260,7 +289,7 @@ async def owner_choose_category(
     category_id = int(callback.data.split(":")[-1])
     await state.update_data(category_id=category_id)
 
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     brands = await repo.list_brands()
 
     if not brands:
@@ -289,11 +318,11 @@ async def owner_choose_brand(callback: CallbackQuery, state: FSMContext) -> None
 
 
 @product_router.message(AddProductStates.enter_name)
-async def owner_enter_name(message: Message, state: FSMContext) -> None:
+async def owner_enter_name(message: Message, state: FSMContext, session: AsyncSession) -> None:
     name = _normalize_text(message.text)
     if _is_cancel_or_back_text(name):
         await state.clear()
-        await owner_menu_products(message, state)
+        await owner_menu_products(message, state, session)
         return
 
     if name in FORBIDDEN_ENTITY_NAMES:
@@ -310,10 +339,10 @@ async def owner_enter_name(message: Message, state: FSMContext) -> None:
 
 
 @product_router.message(AddProductStates.enter_purchase_price)
-async def owner_enter_purchase_price(message: Message, state: FSMContext) -> None:
+async def owner_enter_purchase_price(message: Message, state: FSMContext, session: AsyncSession) -> None:
     if _is_cancel_or_back_text(message.text):
         await state.clear()
-        await owner_menu_products(message, state)
+        await owner_menu_products(message, state, session)
         return
 
     try:
@@ -329,10 +358,10 @@ async def owner_enter_purchase_price(message: Message, state: FSMContext) -> Non
 
 
 @product_router.message(AddProductStates.enter_sale_price)
-async def owner_enter_sale_price(message: Message, state: FSMContext) -> None:
+async def owner_enter_sale_price(message: Message, state: FSMContext, session: AsyncSession) -> None:
     if _is_cancel_or_back_text(message.text):
         await state.clear()
-        await owner_menu_products(message, state)
+        await owner_menu_products(message, state, session)
         return
 
     try:
@@ -349,15 +378,15 @@ async def owner_enter_sale_price(message: Message, state: FSMContext) -> None:
 
 @product_router.callback_query(AddProductStates.ask_photos, F.data == "owner:photos:yes")
 async def owner_photos_yes(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(photos=[])
+    await state.update_data(media=[])
     await state.set_state(AddProductStates.upload_photos)
-    await callback.message.edit_text("Отправляй фото по одному (до 10 шт). Потом нажми «✅ Готово».", reply_markup=done_cancel_kb())
+    await callback.message.edit_text("Отправляй фото или видео по одному (до 10 файлов). Потом нажми «✅ Готово».", reply_markup=done_cancel_kb())
     await callback.answer()
 
 
 @product_router.callback_query(AddProductStates.ask_photos, F.data == "owner:photos:skip")
 async def owner_photos_skip(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(photos=[])
+    await state.update_data(media=[])
     await state.set_state(AddProductStates.enter_sizes)
     await callback.message.edit_text("Введи размеры через запятую (например: 48, 50, 52):", reply_markup=cancel_kb())
     await callback.answer()
@@ -366,15 +395,29 @@ async def owner_photos_skip(callback: CallbackQuery, state: FSMContext) -> None:
 @product_router.message(AddProductStates.upload_photos, F.photo)
 async def owner_upload_photo(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
-    photos: List[str] = data.get("photos", [])
+    media: List[Dict[str, str]] = data.get("media", [])
 
-    if len(photos) >= 10:
-        await message.answer("Лимит 10 фото достигнут. Нажми «✅ Готово».", reply_markup=done_cancel_kb())
+    if len(media) >= 10:
+        await message.answer("Лимит 10 медиа достигнут. Нажми «✅ Готово».", reply_markup=done_cancel_kb())
         return
 
-    photos.append(message.photo[-1].file_id)
-    await state.update_data(photos=photos)
-    await message.answer(f"Фото сохранено ({len(photos)}/10).", reply_markup=done_cancel_kb())
+    media.append({"file_id": message.photo[-1].file_id, "media_type": "photo"})
+    await state.update_data(media=media)
+    await message.answer(f"Фото сохранено ({len(media)}/10).", reply_markup=done_cancel_kb())
+
+
+@product_router.message(AddProductStates.upload_photos, F.video)
+async def owner_upload_video(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    media: List[Dict[str, str]] = data.get("media", [])
+
+    if len(media) >= 10:
+        await message.answer("Лимит 10 медиа достигнут. Нажми «✅ Готово».", reply_markup=done_cancel_kb())
+        return
+
+    media.append({"file_id": message.video.file_id, "media_type": "video"})
+    await state.update_data(media=media)
+    await message.answer(f"Видео сохранено ({len(media)}/10).", reply_markup=done_cancel_kb())
 
 
 @product_router.callback_query(AddProductStates.upload_photos, F.data == "owner:photos:done")
@@ -385,7 +428,12 @@ async def owner_photos_done(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 @product_router.message(AddProductStates.enter_sizes)
-async def owner_enter_sizes(message: Message, state: FSMContext) -> None:
+async def owner_enter_sizes(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    if _is_cancel_or_back_text(message.text):
+        await state.clear()
+        await owner_menu_products(message, state, session)
+        return
+
     parts = [p for p in message.text.replace(" ", "").split(",") if p]
     if not parts:
         await message.answer("Не удалось распознать размеры. Введи через запятую:", reply_markup=cancel_kb())
@@ -398,6 +446,11 @@ async def owner_enter_sizes(message: Message, state: FSMContext) -> None:
 
 @product_router.message(AddProductStates.enter_quantity_for_size)
 async def owner_enter_quantity_for_size(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    if _is_cancel_or_back_text(message.text):
+        await state.clear()
+        await owner_menu_products(message, state, session)
+        return
+
     data = await state.get_data()
     sizes = data.get("sizes", [])
     idx = data.get("current_size_index", 0)
@@ -424,11 +477,15 @@ async def owner_enter_quantity_for_size(message: Message, state: FSMContext, ses
 async def create_product_in_db(message: Message, state: FSMContext, session: AsyncSession) -> None:
     """Сохранение товара в БД и РАССЫЛКА уведомления."""
     data = await state.get_data()
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
 
-    # Загружаем объекты
-    cat = (await session.execute(select(Category).where(Category.id == data["category_id"]))).scalar_one()
-    brand = (await session.execute(select(Brand).where(Brand.id == data["brand_id"]))).scalar_one()
+    cat = await repo.get_category(data["category_id"])
+    brand = await repo.get_brand(data["brand_id"])
+    if cat is None or brand is None:
+        await state.clear()
+        await message.answer("⚠️ Категория или бренд не найдены в текущем магазине. Создай их заново.")
+        await show_owner_main_menu(message)
+        return
 
     product = await repo.create_product(
         title=data["name"],
@@ -438,8 +495,16 @@ async def create_product_in_db(message: Message, state: FSMContext, session: Asy
         brand=brand,
     )
 
-    for photo_id in data.get("photos", []):
-        await repo.add_photo(product=product, file_id=photo_id)
+    media_items = data.get("media")
+    if not media_items and data.get("photos"):
+        media_items = [{"file_id": file_id, "media_type": "photo"} for file_id in data.get("photos", [])]
+
+    for media in media_items or []:
+        await repo.add_photo(
+            product=product,
+            file_id=media["file_id"],
+            media_type=media.get("media_type", "photo"),
+        )
 
     for size in data.get("sizes", []):
         qty = data["quantities"].get(size, 0)
@@ -449,11 +514,10 @@ async def create_product_in_db(message: Message, state: FSMContext, session: Asy
     await session.commit()
 
     # --- РАССЫЛКА ---
-    from config import settings
-    users_ids = (await session.execute(select(User.tg_id).where(User.tg_id != settings.owner_id))).scalars().all()
-    staff_ids = (await session.execute(
-        select(User.tg_id).where(User.role == UserRole.STAFF.value)
-    )).scalars().all()
+    tenant = await get_runtime_tenant(session)
+    users_stmt = select(User.tg_id).where(User.tenant_id == tenant.id, User.tg_id.is_not(None))
+    users_ids = [uid for uid in (await session.execute(users_stmt)).scalars().all() if uid]
+    staff_ids = await list_tenant_recipient_ids(session, tenant.id)
     notify_ids = list(dict.fromkeys([*users_ids, *staff_ids]))
     
     notify_text = (
@@ -469,14 +533,24 @@ async def create_product_in_db(message: Message, state: FSMContext, session: Asy
         sent_count = 0
         for uid in notify_ids:
             try:
-                if data.get("photos"):
-                    await message.bot.send_photo(
-                        uid,
-                        photo=data["photos"][0],
-                        caption=notify_text,
-                        reply_markup=kb.as_markup(),
-                        parse_mode="HTML",
-                    )
+                first_media = (media_items or [None])[0]
+                if first_media:
+                    if normalize_media_type(first_media.get("media_type")) == "video":
+                        await message.bot.send_video(
+                            uid,
+                            video=first_media["file_id"],
+                            caption=notify_text,
+                            reply_markup=kb.as_markup(),
+                            parse_mode="HTML",
+                        )
+                    else:
+                        await message.bot.send_photo(
+                            uid,
+                            photo=first_media["file_id"],
+                            caption=notify_text,
+                            reply_markup=kb.as_markup(),
+                            parse_mode="HTML",
+                        )
                 else:
                     await message.bot.send_message(
                         uid,
@@ -515,7 +589,7 @@ async def create_product_in_db(message: Message, state: FSMContext, session: Asy
 @product_router.message(F.text == "✏️ Редактировать товар")
 @owner_only
 async def owner_edit_start(message: Message, state: FSMContext, session: AsyncSession):
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     categories = await repo.list_categories()
     if not categories:
         await message.answer("Категории не найдены.")
@@ -529,7 +603,7 @@ async def owner_edit_start(message: Message, state: FSMContext, session: AsyncSe
 async def owner_edit_cat(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     cat_id = int(callback.data.split(":")[-1])
     await state.update_data(category_id=cat_id)
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     brands = await repo.get_brands_by_category(cat_id)
     kb = build_brands_kb(list(brands))
     await state.set_state(EditProductStates.choose_brand)
@@ -539,7 +613,7 @@ async def owner_edit_cat(callback: CallbackQuery, state: FSMContext, session: As
 async def owner_edit_brand(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     brand_id = int(callback.data.split(":")[-1])
     data = await state.get_data()
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     products = await repo.list_products_by_category_brand(data["category_id"], brand_id)
     if not products:
         await callback.message.edit_text("Товары не найдены.", reply_markup=None)
@@ -554,13 +628,21 @@ async def owner_edit_brand(callback: CallbackQuery, state: FSMContext, session: 
 
 @product_router.callback_query(F.data.startswith("owner:edit_prod:"))
 async def owner_show_edit_card(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
-    if "owner:edit_prod:" in callback.data:
-        product_id = int(callback.data.split(":")[-1])
-        await state.update_data(product_id=product_id)
+    if callback.data.startswith("owner:edit_prod:"):
+        suffix = callback.data.split(":")[-1]
+        if suffix.isdigit():
+            product_id = int(suffix)
+            await state.update_data(product_id=product_id)
+        else:
+            product_id = (await state.get_data()).get("product_id")
     else:
         product_id = (await state.get_data()).get("product_id")
 
-    repo = CatalogRepo(session)
+    if product_id is None:
+        await callback.answer("Товар не найден", show_alert=True)
+        return
+
+    repo = await _get_catalog_repo(session)
     product = await repo.get_product_with_details(product_id)
     
     if not product:
@@ -584,9 +666,9 @@ async def owner_show_edit_card(callback: CallbackQuery, state: FSMContext, sessi
     kb.button(text="💰 Изм. Цену", callback_data="edit:action:price")
     kb.button(text="📦 Изм. Остатки", callback_data="edit:action:stock")
     kb.button(text="📝 Изм. Описание", callback_data="edit:action:desc")
-    kb.button(text="🖼 Добавить фото", callback_data="edit:action:photo")
+    kb.button(text="🖼 Добавить медиа", callback_data="edit:action:photo")
     if product.photos:
-        kb.button(text="🗑 Удалить фото", callback_data="edit:action:photo_delete")
+        kb.button(text="🗑 Удалить медиа", callback_data="edit:action:photo_delete")
     kb.button(text="🔙 Назад к списку", callback_data="owner:cancel")
     kb.adjust(2, 2, 2)
 
@@ -597,9 +679,9 @@ async def owner_show_edit_card(callback: CallbackQuery, state: FSMContext, sessi
             await callback.message.delete()
         except Exception:
             pass
-        await callback.message.answer_photo(product.photos[0].file_id, caption=text, reply_markup=kb.as_markup(), parse_mode="HTML")
+        await _send_product_media_preview(callback.message, list(product.photos), text, kb.as_markup())
     else:
-        if callback.message.photo:
+        if callback.message.photo or callback.message.video:
             await callback.message.delete()
             await callback.message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
         else:
@@ -638,7 +720,7 @@ async def process_edit_price(message: Message, state: FSMContext, session: Async
         new_purchase = float(parts[0].replace(",", "."))
         new_sale = float(parts[1].replace(",", "."))
         
-        repo = CatalogRepo(session)
+        repo = await _get_catalog_repo(session)
         data = await state.get_data()
         await repo.update_product_prices(data["product_id"], new_purchase, new_sale)
         await session.commit()
@@ -679,7 +761,7 @@ async def process_edit_desc(message: Message, state: FSMContext, session: AsyncS
     if desc == "-": 
         desc = None
         
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     # Получаем ID из состояния
     data = await state.get_data()
     product_id = data.get("product_id")
@@ -695,7 +777,7 @@ async def process_edit_desc(message: Message, state: FSMContext, session: AsyncS
 
 @product_router.callback_query(F.data == "edit:action:stock")
 async def start_edit_stock(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     product = await repo.get_product_with_details((await state.get_data())["product_id"])
     kb = InlineKeyboardBuilder()
     for s in product.stock:
@@ -749,7 +831,7 @@ async def process_stock_update(message: Message, state: FSMContext, session: Asy
     pid = data.get("product_id")
     editing_size = data.get("editing_size")
     
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     
     try:
         if editing_size:
@@ -776,37 +858,46 @@ async def process_stock_update(message: Message, state: FSMContext, session: Asy
 @product_router.callback_query(F.data == "edit:action:photo")
 async def start_add_photo(callback: CallbackQuery, state: FSMContext):
     await state.set_state(EditProductStates.wait_for_new_photo)
-    await callback.message.answer("📸 Отправь НОВОЕ фото:", reply_markup=cancel_kb())
+    await callback.message.answer("📸 Отправь новое фото или видео:", reply_markup=cancel_kb())
     await callback.answer()
 
 @product_router.callback_query(F.data == "edit:action:photo_delete")
 async def start_delete_photo(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     product_id = (await state.get_data()).get("product_id")
     product = await repo.get_product_with_details(product_id)
     if not product or not product.photos:
-        await callback.answer("Нет фото для удаления", show_alert=True)
+        await callback.answer("Нет медиа для удаления", show_alert=True)
         return
 
     kb = InlineKeyboardBuilder()
+    media_lines = []
     for idx, ph in enumerate(product.photos, 1):
-        kb.button(text=f"🗑 Фото {idx}", callback_data=f"edit:photo:del:{ph.id}")
+        media_label = "Видео" if normalize_media_type(getattr(ph, "media_type", None)) == "video" else "Фото"
+        kb.button(text=f"🗑 {media_label} {idx}", callback_data=f"edit:photo:del:{ph.id}")
+        media_lines.append(describe_media_item(ph, idx))
     kb.button(text="🔙 Назад", callback_data="owner:edit_prod:back")
     kb.adjust(1)
 
     await state.set_state(EditProductStates.choose_photo_to_delete)
-    await callback.message.answer("Выберите фото для удаления:", reply_markup=kb.as_markup())
+    preview_text = (
+        f"🧩 <b>Медиа товара #{product.id}</b>\n"
+        f"🏷 <b>{product.title}</b>\n\n"
+        f"Доступные файлы:\n" + "\n".join(media_lines) + "\n\n"
+        f"Выберите файл для удаления кнопкой ниже."
+    )
+    await _send_product_media_preview(callback.message, list(product.photos), preview_text, kb.as_markup())
     await callback.answer()
 
 @product_router.callback_query(F.data.startswith("edit:photo:del:"))
 async def delete_photo_confirm(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     photo_id = int(callback.data.split(":")[-1])
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     if not await repo.delete_photo(photo_id):
-        await callback.answer("Фото не найдено", show_alert=True)
+        await callback.answer("Медиа не найдено", show_alert=True)
         return
     await session.commit()
-    await callback.message.answer("✅ Фото удалено!")
+    await callback.message.answer("✅ Медиа удалено!")
     if await _maybe_show_staff_menu(callback.message, session):
         await state.clear()
         return
@@ -815,11 +906,24 @@ async def delete_photo_confirm(callback: CallbackQuery, state: FSMContext, sessi
 
 @product_router.message(EditProductStates.wait_for_new_photo, F.photo)
 async def process_add_photo_edit(message: Message, state: FSMContext, session: AsyncSession):
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     prod = await repo.get_product_with_details((await state.get_data())["product_id"])
-    await repo.add_photo(prod, message.photo[-1].file_id)
+    await repo.add_photo(prod, message.photo[-1].file_id, media_type="photo")
     await session.commit()
     await message.answer("✅ Фото добавлено!")
+    if await _maybe_show_staff_menu(message, session):
+        await state.clear()
+        return
+    await owner_show_edit_card_manual(message, state, session)
+
+
+@product_router.message(EditProductStates.wait_for_new_photo, F.video)
+async def process_add_video_edit(message: Message, state: FSMContext, session: AsyncSession):
+    repo = await _get_catalog_repo(session)
+    prod = await repo.get_product_with_details((await state.get_data())["product_id"])
+    await repo.add_photo(prod, message.video.file_id, media_type="video")
+    await session.commit()
+    await message.answer("✅ Видео добавлено!")
     if await _maybe_show_staff_menu(message, session):
         await state.clear()
         return

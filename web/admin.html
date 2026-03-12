@@ -30,6 +30,7 @@
         <div class="control">
           <label for="admin-key">Ключ администратора</label>
           <input id="admin-key" type="password" placeholder="Введите WEB_ADMIN_KEY" />
+          <button class="card__more card__more--ghost" id="toggle-admin-key-visibility" type="button">Показать</button>
         </div>
         <div class="control">
           <label for="title">Название товара</label>
@@ -113,6 +114,99 @@
 
     <section class="card admin-form-card">
       <div class="admin-table-head">
+        <h3 class="card__title">Настройки магазина</h3>
+        <button class="btn" id="load-tenant-settings" type="button">Загрузить настройки</button>
+      </div>
+      <div class="checkout-grid">
+        <div class="control">
+          <label for="tenant-slug">Tenant slug</label>
+          <input id="tenant-slug" type="text" placeholder="default" />
+        </div>
+        <div class="control">
+          <label for="tenant-domain">Domain</label>
+          <input id="tenant-domain" type="text" placeholder="shop.example.com" />
+        </div>
+      </div>
+      <div class="checkout-grid">
+        <div class="control">
+          <label for="tenant-title">Название магазина</label>
+          <input id="tenant-title" type="text" placeholder="Например: Flower Boutique" />
+        </div>
+        <div class="control">
+          <label for="storefront-title">Заголовок витрины</label>
+          <input id="storefront-title" type="text" placeholder="Заголовок storefront" />
+        </div>
+      </div>
+      <div class="checkout-grid">
+        <div class="control">
+          <label for="support-label">Поддержка</label>
+          <input id="support-label" type="text" placeholder="Например: Флорист" />
+        </div>
+        <div class="control">
+          <label for="owner-title">Роль владельца</label>
+          <input id="owner-title" type="text" placeholder="Владелец" />
+        </div>
+      </div>
+      <div class="checkout-grid">
+        <div class="control">
+          <label for="staff-title">Роль сотрудника</label>
+          <input id="staff-title" type="text" placeholder="Сотрудник" />
+        </div>
+        <div class="control">
+          <label for="tenant-admin-api-key">Tenant admin API key</label>
+          <input id="tenant-admin-api-key" type="password" placeholder="Новый Bearer key для этого tenant" />
+          <button class="card__more card__more--ghost" id="toggle-tenant-api-key-visibility" type="button">Показать</button>
+        </div>
+      </div>
+      <div class="checkout-grid">
+        <div class="control">
+          <label for="button-support">Кнопка поддержки</label>
+          <input id="button-support" type="text" placeholder="💬 Поддержка" />
+        </div>
+        <div class="control"></div>
+      </div>
+      <div class="checkout-grid">
+        <div class="control">
+          <label for="button-catalog">Кнопка каталога</label>
+          <input id="button-catalog" type="text" placeholder="🛍 Каталог" />
+        </div>
+        <div class="control">
+          <label for="button-cart">Кнопка корзины</label>
+          <input id="button-cart" type="text" placeholder="🛒 Корзина" />
+        </div>
+      </div>
+      <div class="checkout-grid">
+        <div class="control">
+          <label for="button-orders">Кнопка заказов</label>
+          <input id="button-orders" type="text" placeholder="📦 Заказы" />
+        </div>
+        <div class="control">
+          <label for="button-ai">Кнопка AI</label>
+          <input id="button-ai" type="text" placeholder="✨ AI-Консультант" />
+        </div>
+      </div>
+      <div class="control">
+        <label for="welcome-client">Приветствие клиента</label>
+        <textarea id="welcome-client" rows="2" placeholder="Привет! Выбери действие:"></textarea>
+      </div>
+      <div class="control">
+        <label for="welcome-staff">Приветствие сотрудника</label>
+        <textarea id="welcome-staff" rows="2" placeholder="Привет! Твой рабочий терминал готов."></textarea>
+      </div>
+      <div class="control">
+        <label for="welcome-owner">Приветствие владельца</label>
+        <textarea id="welcome-owner" rows="2" placeholder="Привет! Выбери действие:"></textarea>
+      </div>
+      <div class="admin-actions">
+        <button class="btn" id="save-tenant-settings" type="button">Сохранить настройки</button>
+        <button class="btn" id="regenerate-tenant-api-key" type="button">Сгенерировать новый admin API key</button>
+        <button class="card__more card__more--ghost" id="reset-tenant-settings" type="button">Сбросить к дефолту</button>
+      </div>
+      <p class="meta" id="tenant-settings-status">Загрузите настройки магазина.</p>
+    </section>
+
+    <section class="card admin-form-card">
+      <div class="admin-table-head">
         <h3 class="card__title">Товары (редактирование / удаление)</h3>
         <button class="btn" id="reload-products" type="button">Обновить таблицу</button>
       </div>
@@ -137,6 +231,94 @@
       </div>
       <p class="meta" id="products-meta">Загрузите таблицу товаров.</p>
     </section>
+
+    <section class="card admin-form-card">
+      <div class="admin-table-head">
+        <h3 class="card__title">Онбординг нового магазина</h3>
+        <button class="btn" id="load-tenants" type="button">Обновить список магазинов</button>
+      </div>
+      <div class="checkout-grid">
+        <div class="control">
+          <label for="new-tenant-slug">Slug</label>
+          <input id="new-tenant-slug" type="text" placeholder="flowers-boutique" />
+        </div>
+        <div class="control">
+          <label for="new-tenant-title">Название магазина</label>
+          <input id="new-tenant-title" type="text" placeholder="Flowers Boutique" />
+        </div>
+      </div>
+      <div class="checkout-grid">
+        <div class="control">
+          <label for="new-tenant-preset">Preset ниши</label>
+          <select id="new-tenant-preset">
+            <option value="">Без пресета</option>
+          </select>
+        </div>
+        <div class="control">
+          <label for="new-tenant-domain">Domain</label>
+          <input id="new-tenant-domain" type="text" placeholder="flowers.example.com" />
+        </div>
+      </div>
+      <div class="checkout-grid">
+        <div class="control">
+          <label for="new-tenant-bot-token">Bot token</label>
+          <input id="new-tenant-bot-token" type="text" placeholder="123456:AA..." />
+        </div>
+        <div class="control">
+          <label for="new-tenant-owner-tg-id">Owner TG ID</label>
+          <input id="new-tenant-owner-tg-id" type="number" min="1" step="1" placeholder="123456789" />
+        </div>
+      </div>
+      <div class="checkout-grid">
+        <div class="control">
+          <label for="new-tenant-admin-api-key">Admin API key (опционально)</label>
+          <input id="new-tenant-admin-api-key" type="text" placeholder="Будет сгенерирован автоматически" />
+        </div>
+        <div class="control">
+          <label for="bulk-provision-csv">CSV для массового provisioning</label>
+          <input id="bulk-provision-csv" type="file" accept=".csv,text/csv" />
+          <p class="meta">Колонки: slug,title,preset_key,domain,bot_token,owner_tg_id,admin_api_key,owner_username,owner_first_name,owner_last_name</p>
+        </div>
+      </div>
+      <div class="admin-actions">
+        <button class="btn" id="load-tenant-presets" type="button">Загрузить пресеты</button>
+        <button class="btn" id="download-bulk-template" type="button">Скачать CSV шаблон</button>
+        <button class="card__buy" id="create-tenant" type="button">Создать магазин</button>
+        <button class="btn" id="bulk-provision-tenants" type="button">Массово создать магазины</button>
+      </div>
+      <div class="admin-table-wrap">
+        <table class="admin-table" id="bulk-preview-table">
+          <thead>
+            <tr>
+              <th>Slug</th>
+              <th>Название</th>
+              <th>Preset</th>
+              <th>Domain</th>
+              <th>Owner TG ID</th>
+            </tr>
+          </thead>
+          <tbody id="bulk-preview-tbody"></tbody>
+        </table>
+      </div>
+      <p class="meta" id="tenants-status">Создайте новый tenant или обновите список существующих.</p>
+      <div class="admin-table-wrap">
+        <table class="admin-table" id="tenants-table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Slug</th>
+              <th>Название</th>
+              <th>Domain</th>
+              <th>Owner TG ID</th>
+              <th>Bot</th>
+              <th>Admin key</th>
+              <th>Статус</th>
+            </tr>
+          </thead>
+          <tbody id="tenants-tbody"></tbody>
+        </table>
+      </div>
+    </section>
   </main>
 
   <script>
@@ -153,6 +335,7 @@
     const categoriesList = document.getElementById('categories-list');
     const brandsList = document.getElementById('brands-list');
     const statusEl = document.getElementById('admin-status');
+    const toggleAdminKeyVisibilityBtn = document.getElementById('toggle-admin-key-visibility');
     const loadMetaBtn = document.getElementById('load-meta');
     const createBtn = document.getElementById('create-product');
     const dateFromInput = document.getElementById('date-from');
@@ -163,6 +346,46 @@
     const reloadProductsBtn = document.getElementById('reload-products');
     const productsTbody = document.getElementById('products-tbody');
     const productsMeta = document.getElementById('products-meta');
+    const loadTenantSettingsBtn = document.getElementById('load-tenant-settings');
+    const saveTenantSettingsBtn = document.getElementById('save-tenant-settings');
+    const regenerateTenantApiKeyBtn = document.getElementById('regenerate-tenant-api-key');
+    const resetTenantSettingsBtn = document.getElementById('reset-tenant-settings');
+    const toggleTenantApiKeyVisibilityBtn = document.getElementById('toggle-tenant-api-key-visibility');
+    const tenantSettingsStatus = document.getElementById('tenant-settings-status');
+    const tenantSlugInput = document.getElementById('tenant-slug');
+    const tenantDomainInput = document.getElementById('tenant-domain');
+    const tenantTitleInput = document.getElementById('tenant-title');
+    const storefrontTitleInput = document.getElementById('storefront-title');
+    const supportLabelInput = document.getElementById('support-label');
+    const ownerTitleInput = document.getElementById('owner-title');
+    const staffTitleInput = document.getElementById('staff-title');
+    const tenantAdminApiKeyInput = document.getElementById('tenant-admin-api-key');
+    const buttonCatalogInput = document.getElementById('button-catalog');
+    const buttonCartInput = document.getElementById('button-cart');
+    const buttonOrdersInput = document.getElementById('button-orders');
+    const buttonAiInput = document.getElementById('button-ai');
+    const buttonSupportInput = document.getElementById('button-support');
+    const welcomeClientInput = document.getElementById('welcome-client');
+    const welcomeStaffInput = document.getElementById('welcome-staff');
+    const welcomeOwnerInput = document.getElementById('welcome-owner');
+    const loadTenantsBtn = document.getElementById('load-tenants');
+    const createTenantBtn = document.getElementById('create-tenant');
+    const tenantsStatus = document.getElementById('tenants-status');
+    const tenantsTbody = document.getElementById('tenants-tbody');
+    const newTenantSlugInput = document.getElementById('new-tenant-slug');
+    const newTenantTitleInput = document.getElementById('new-tenant-title');
+    const newTenantPresetInput = document.getElementById('new-tenant-preset');
+    const newTenantDomainInput = document.getElementById('new-tenant-domain');
+    const newTenantBotTokenInput = document.getElementById('new-tenant-bot-token');
+    const newTenantOwnerTgIdInput = document.getElementById('new-tenant-owner-tg-id');
+    const newTenantAdminApiKeyInput = document.getElementById('new-tenant-admin-api-key');
+    const bulkProvisionCsvInput = document.getElementById('bulk-provision-csv');
+    const loadTenantPresetsBtn = document.getElementById('load-tenant-presets');
+    const downloadBulkTemplateBtn = document.getElementById('download-bulk-template');
+    const bulkProvisionTenantsBtn = document.getElementById('bulk-provision-tenants');
+    const bulkPreviewTbody = document.getElementById('bulk-preview-tbody');
+    let bulkProvisionRows = [];
+    let activeTenantSlug = '';
 
     function toDateInputValue(date) {
       const y = date.getFullYear();
@@ -185,6 +408,16 @@
       reportStatus.style.color = isError ? '#fda4af' : '';
     }
 
+    function setTenantSettingsStatus(text, isError = false) {
+      tenantSettingsStatus.textContent = text;
+      tenantSettingsStatus.style.color = isError ? '#fda4af' : '';
+    }
+
+    function setTenantsStatus(text, isError = false) {
+      tenantsStatus.textContent = text;
+      tenantsStatus.style.color = isError ? '#fda4af' : '';
+    }
+
     function requireKey() {
       const key = adminKey.value.trim();
       if (!key) {
@@ -200,6 +433,23 @@
         ...extra,
         Authorization: `Bearer ${key}`,
       };
+    }
+
+    function setAdminKeyVisibility(isVisible) {
+      adminKey.type = isVisible ? 'text' : 'password';
+      toggleAdminKeyVisibilityBtn.textContent = isVisible ? 'Скрыть' : 'Показать';
+    }
+
+    function buildAdminUrl(path) {
+      const slug = activeTenantSlug || tenantSlugInput.value.trim();
+      if (!slug) return path;
+      const separator = path.includes('?') ? '&' : '?';
+      return `${path}${separator}tenant=${encodeURIComponent(slug)}`;
+    }
+
+    function setTenantApiKeyVisibility(isVisible) {
+      tenantAdminApiKeyInput.type = isVisible ? 'text' : 'password';
+      toggleTenantApiKeyVisibilityBtn.textContent = isVisible ? 'Скрыть' : 'Показать';
     }
 
     async function loadMeta() {
@@ -436,15 +686,453 @@
       }
     }
 
+    function applyTenantSettings(data) {
+      activeTenantSlug = data.slug || activeTenantSlug || '';
+      tenantSlugInput.value = data.slug || '';
+      tenantDomainInput.value = data.domain || '';
+      tenantTitleInput.value = data.title || '';
+      tenantAdminApiKeyInput.value = data.admin_api_key || '';
+      setTenantApiKeyVisibility(false);
+      storefrontTitleInput.value = data.storefront_title || '';
+      supportLabelInput.value = data.support_label || '';
+      ownerTitleInput.value = data.owner_title || '';
+      staffTitleInput.value = data.staff_title || '';
+      buttonCatalogInput.value = data.button_labels?.catalog || '';
+      buttonCartInput.value = data.button_labels?.cart || '';
+      buttonOrdersInput.value = data.button_labels?.orders || '';
+      buttonAiInput.value = data.button_labels?.ai || '';
+      buttonSupportInput.value = data.button_labels?.support || '';
+      welcomeClientInput.value = data.welcome_text_client || '';
+      welcomeStaffInput.value = data.welcome_text_staff || '';
+      welcomeOwnerInput.value = data.welcome_text_owner || '';
+    }
+
+    async function loadTenantSettings() {
+      const key = requireKey();
+      if (!key) return;
+
+      loadTenantSettingsBtn.disabled = true;
+      setTenantSettingsStatus('Загружаем настройки магазина...');
+      try {
+        const res = await fetch(buildAdminUrl('/api/admin/tenant-settings'), {
+          headers: authHeaders(key),
+        });
+        if (!res.ok) {
+          const payload = await res.json().catch(() => ({}));
+          throw new Error(payload.detail || `HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        applyTenantSettings(data);
+        if (data.admin_api_key) {
+          adminKey.value = data.admin_api_key;
+        }
+        setTenantSettingsStatus(`Настройки загружены для магазина ${data.title}.`);
+      } catch (error) {
+        setTenantSettingsStatus(`Ошибка загрузки настроек: ${error.message}`, true);
+      } finally {
+        loadTenantSettingsBtn.disabled = false;
+      }
+    }
+
+    async function regenerateTenantApiKey() {
+      const key = requireKey();
+      if (!key) return;
+      if (!confirm('Сгенерировать новый admin API key для текущего tenant? Старый ключ перестанет работать.')) return;
+
+      regenerateTenantApiKeyBtn.disabled = true;
+      setTenantSettingsStatus('Генерируем новый admin API key...');
+      try {
+        const res = await fetch(buildAdminUrl('/api/admin/tenant-settings/regenerate-key'), {
+          method: 'POST',
+          headers: authHeaders(key),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.detail || `HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        applyTenantSettings(data);
+        if (data.admin_api_key) {
+          adminKey.value = data.admin_api_key;
+        }
+        setTenantSettingsStatus('Новый admin API key сгенерирован и применён.');
+      } catch (error) {
+        setTenantSettingsStatus(`Ошибка генерации ключа: ${error.message}`, true);
+      } finally {
+        regenerateTenantApiKeyBtn.disabled = false;
+      }
+    }
+
+    async function saveTenantSettings() {
+      const key = requireKey();
+      if (!key) return;
+
+      saveTenantSettingsBtn.disabled = true;
+      setTenantSettingsStatus('Сохраняем настройки магазина...');
+      try {
+        const payload = {
+          slug: tenantSlugInput.value.trim(),
+          title: tenantTitleInput.value.trim(),
+          domain: tenantDomainInput.value.trim(),
+          admin_api_key: tenantAdminApiKeyInput.value.trim(),
+          storefront_title: storefrontTitleInput.value.trim(),
+          support_label: supportLabelInput.value.trim(),
+          owner_title: ownerTitleInput.value.trim(),
+          staff_title: staffTitleInput.value.trim(),
+          welcome_text_client: welcomeClientInput.value.trim(),
+          welcome_text_staff: welcomeStaffInput.value.trim(),
+          welcome_text_owner: welcomeOwnerInput.value.trim(),
+          button_labels: {
+            catalog: buttonCatalogInput.value.trim(),
+            cart: buttonCartInput.value.trim(),
+            orders: buttonOrdersInput.value.trim(),
+            ai: buttonAiInput.value.trim(),
+            support: buttonSupportInput.value.trim(),
+          },
+        };
+
+        const res = await fetch(buildAdminUrl('/api/admin/tenant-settings'), {
+          method: 'PUT',
+          headers: authHeaders(key, { 'Content-Type': 'application/json' }),
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.detail || `HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        applyTenantSettings(data);
+        if (data.admin_api_key) {
+          adminKey.value = data.admin_api_key;
+        }
+        setTenantSettingsStatus(`Настройки магазина ${data.title} сохранены.`);
+      } catch (error) {
+        setTenantSettingsStatus(`Ошибка сохранения: ${error.message}`, true);
+      } finally {
+        saveTenantSettingsBtn.disabled = false;
+      }
+    }
+
+    async function resetTenantSettings() {
+      const key = requireKey();
+      if (!key) return;
+      if (!confirm('Сбросить настройки магазина к дефолтным?')) return;
+
+      resetTenantSettingsBtn.disabled = true;
+      setTenantSettingsStatus('Сбрасываем настройки магазина...');
+      try {
+        const res = await fetch(buildAdminUrl('/api/admin/tenant-settings'), {
+          method: 'DELETE',
+          headers: authHeaders(key),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.detail || `HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        applyTenantSettings(data);
+        setTenantSettingsStatus('Настройки магазина сброшены к дефолту.');
+      } catch (error) {
+        setTenantSettingsStatus(`Ошибка сброса: ${error.message}`, true);
+      } finally {
+        resetTenantSettingsBtn.disabled = false;
+      }
+    }
+
+    function renderTenants(items) {
+      tenantsTbody.innerHTML = '';
+      for (const item of items || []) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${item.tenant_id}</td>
+          <td>${esc(item.slug)}</td>
+          <td>${esc(item.title)}</td>
+          <td>${esc(item.domain || '—')}</td>
+          <td>${esc(item.owner_tg_id || '—')}</td>
+          <td>${item.has_bot_token ? 'yes' : 'no'}</td>
+          <td>${item.has_admin_api_key ? 'yes' : 'no'}</td>
+          <td>${esc(item.status)}</td>
+        `;
+        tr.addEventListener('click', () => {
+          activeTenantSlug = item.slug || '';
+          tenantSlugInput.value = item.slug || '';
+          setTenantsStatus(`Активный tenant: ${item.title} (${item.slug}). Теперь можно загрузить его настройки.`);
+        });
+        tenantsTbody.appendChild(tr);
+      }
+    }
+
+    function renderTenantPresets(items) {
+      newTenantPresetInput.innerHTML = '<option value="">Без пресета</option>';
+      for (const item of items || []) {
+        const option = document.createElement('option');
+        option.value = item.key;
+        option.textContent = `${item.title} (${item.key})`;
+        option.title = `${item.description || ''}\nDemo products: ${(item.demo_product_titles || []).join(', ')}`;
+        newTenantPresetInput.appendChild(option);
+      }
+    }
+
+    function buildBulkTemplateCsv() {
+      return [
+        'slug,title,preset_key,domain,bot_token,owner_tg_id,admin_api_key,owner_username,owner_first_name,owner_last_name',
+        'flowers-north,Flowers North,flowers,flowers-north.example.com,,1001,,owner_north,Anna,North',
+        'watch-private,Watch Private,watches,watch-private.example.com,,1002,,owner_watch,Victor,Prime',
+      ].join('\n');
+    }
+
+    function downloadBulkTemplate() {
+      const blob = new Blob([buildBulkTemplateCsv()], { type: 'text/csv;charset=utf-8' });
+      const downloadUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = downloadUrl;
+      link.download = 'tenant_bulk_template.csv';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(downloadUrl);
+      setTenantsStatus('CSV шаблон скачан. Заполните строки и импортируйте файл.');
+    }
+
+    function parseCsvLine(line) {
+      const values = [];
+      let current = '';
+      let inQuotes = false;
+      for (let index = 0; index < line.length; index += 1) {
+        const char = line[index];
+        if (char === '"') {
+          if (inQuotes && line[index + 1] === '"') {
+            current += '"';
+            index += 1;
+          } else {
+            inQuotes = !inQuotes;
+          }
+        } else if (char === ',' && !inQuotes) {
+          values.push(current);
+          current = '';
+        } else {
+          current += char;
+        }
+      }
+      values.push(current);
+      return values.map((value) => value.trim());
+    }
+
+    function renderBulkPreview(items) {
+      bulkPreviewTbody.innerHTML = '';
+      for (const item of items.slice(0, 8)) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${esc(item.slug || '')}</td>
+          <td>${esc(item.title || '')}</td>
+          <td>${esc(item.preset_key || '—')}</td>
+          <td>${esc(item.domain || '—')}</td>
+          <td>${esc(item.owner_tg_id || '—')}</td>
+        `;
+        bulkPreviewTbody.appendChild(tr);
+      }
+    }
+
+    async function importBulkProvisionCsv() {
+      const file = bulkProvisionCsvInput.files?.[0];
+      if (!file) {
+        bulkProvisionRows = [];
+        bulkPreviewTbody.innerHTML = '';
+        setTenantsStatus('Выберите CSV файл для массового provisioning.', true);
+        return;
+      }
+
+      const text = await file.text();
+      const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      if (lines.length < 2) {
+        bulkProvisionRows = [];
+        bulkPreviewTbody.innerHTML = '';
+        setTenantsStatus('CSV должен содержать заголовок и хотя бы одну строку.', true);
+        return;
+      }
+
+      const headers = parseCsvLine(lines[0]);
+      bulkProvisionRows = lines.slice(1).map((line) => {
+        const values = parseCsvLine(line);
+        const row = {};
+        headers.forEach((header, idx) => {
+          row[header] = values[idx] ?? '';
+        });
+        return {
+          slug: row.slug || '',
+          title: row.title || '',
+          preset_key: row.preset_key || null,
+          domain: row.domain || null,
+          bot_token: row.bot_token || null,
+          owner_tg_id: row.owner_tg_id ? Number(row.owner_tg_id) : null,
+          admin_api_key: row.admin_api_key || null,
+          owner_username: row.owner_username || null,
+          owner_first_name: row.owner_first_name || null,
+          owner_last_name: row.owner_last_name || null,
+        };
+      }).filter((row) => row.slug && row.title);
+
+      renderBulkPreview(bulkProvisionRows);
+      setTenantsStatus(`CSV импортирован: подготовлено ${bulkProvisionRows.length} строк для provisioning.`);
+    }
+
+    async function loadTenantPresets() {
+      const key = requireKey();
+      if (!key) return;
+
+      loadTenantPresetsBtn.disabled = true;
+      setTenantsStatus('Загружаем пресеты ниш...');
+      try {
+        const res = await fetch('/api/admin/tenant-presets', {
+          headers: authHeaders(key),
+        });
+        if (!res.ok) {
+          const payload = await res.json().catch(() => ({}));
+          throw new Error(payload.detail || `HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        renderTenantPresets(data.items || []);
+        setTenantsStatus(`Пресеты загружены: ${data.total}.`);
+      } catch (error) {
+        setTenantsStatus(`Ошибка загрузки пресетов: ${error.message}`, true);
+      } finally {
+        loadTenantPresetsBtn.disabled = false;
+      }
+    }
+
+    async function loadTenants() {
+      const key = requireKey();
+      if (!key) return;
+
+      loadTenantsBtn.disabled = true;
+      setTenantsStatus('Загружаем список магазинов...');
+      try {
+        const res = await fetch('/api/admin/tenants', {
+          headers: authHeaders(key),
+        });
+        if (!res.ok) {
+          const payload = await res.json().catch(() => ({}));
+          throw new Error(payload.detail || `HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        renderTenants(data.items || []);
+        setTenantsStatus(`Загружено магазинов: ${data.total}. Нажмите на строку, чтобы выбрать tenant.`);
+      } catch (error) {
+        setTenantsStatus(`Ошибка загрузки магазинов: ${error.message}`, true);
+      } finally {
+        loadTenantsBtn.disabled = false;
+      }
+    }
+
+    async function createTenant() {
+      const key = requireKey();
+      if (!key) return;
+
+      const slug = newTenantSlugInput.value.trim();
+      const title = newTenantTitleInput.value.trim();
+      const ownerTgIdRaw = newTenantOwnerTgIdInput.value.trim();
+      if (!slug || !title || !ownerTgIdRaw) {
+        setTenantsStatus('Укажите slug, название магазина и owner TG ID.', true);
+        return;
+      }
+
+      createTenantBtn.disabled = true;
+      setTenantsStatus('Создаём новый магазин...');
+      try {
+        const payload = {
+          slug,
+          title,
+          preset_key: newTenantPresetInput.value || null,
+          domain: newTenantDomainInput.value.trim() || null,
+          bot_token: newTenantBotTokenInput.value.trim() || null,
+          owner_tg_id: Number(ownerTgIdRaw),
+          admin_api_key: newTenantAdminApiKeyInput.value.trim() || null,
+        };
+        const res = await fetch('/api/admin/tenants', {
+          method: 'POST',
+          headers: authHeaders(key, { 'Content-Type': 'application/json' }),
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.detail || `HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        activeTenantSlug = data.tenant.slug || '';
+        tenantSlugInput.value = data.tenant.slug || '';
+        tenantTitleInput.value = data.tenant.title || '';
+        tenantDomainInput.value = data.tenant.domain || '';
+        if (data.admin_api_key) {
+          tenantAdminApiKeyInput.value = data.admin_api_key;
+        }
+        setTenantsStatus(`Магазин ${data.tenant.title} создан. Demo products: ${data.demo_products_seeded}. Сразу можете открыть его настройки.`);
+        await loadTenants();
+      } catch (error) {
+        setTenantsStatus(`Ошибка создания магазина: ${error.message}`, true);
+      } finally {
+        createTenantBtn.disabled = false;
+      }
+    }
+
+    async function bulkProvisionTenants() {
+      const key = requireKey();
+      if (!key) return;
+
+      if (!bulkProvisionRows.length) {
+        setTenantsStatus('Сначала импортируйте CSV файл с tenant-строками.', true);
+        return;
+      }
+
+      bulkProvisionTenantsBtn.disabled = true;
+      setTenantsStatus('Запускаем массовый provisioning магазинов...');
+      try {
+        const res = await fetch('/api/admin/tenants/bulk-provision', {
+          method: 'POST',
+          headers: authHeaders(key, { 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ items: bulkProvisionRows }),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.detail || `HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        const demoSeeded = (data.created || []).reduce((sum, item) => sum + Number(item.demo_products_seeded || 0), 0);
+        setTenantsStatus(`Массовый provisioning завершен: создано ${data.total_created} магазинов, demo products: ${demoSeeded}.`);
+        await loadTenants();
+      } catch (error) {
+        setTenantsStatus(`Ошибка массового provisioning: ${error.message}`, true);
+      } finally {
+        bulkProvisionTenantsBtn.disabled = false;
+      }
+    }
+
     loadMetaBtn.addEventListener('click', loadMeta);
     createBtn.addEventListener('click', createProduct);
     reloadProductsBtn.addEventListener('click', loadProducts);
     downloadReportBtn.addEventListener('click', downloadReport);
+    loadTenantSettingsBtn.addEventListener('click', loadTenantSettings);
+    saveTenantSettingsBtn.addEventListener('click', saveTenantSettings);
+    regenerateTenantApiKeyBtn.addEventListener('click', regenerateTenantApiKey);
+    resetTenantSettingsBtn.addEventListener('click', resetTenantSettings);
+    loadTenantsBtn.addEventListener('click', loadTenants);
+    loadTenantPresetsBtn.addEventListener('click', loadTenantPresets);
+    downloadBulkTemplateBtn.addEventListener('click', downloadBulkTemplate);
+    bulkProvisionCsvInput.addEventListener('change', importBulkProvisionCsv);
+    createTenantBtn.addEventListener('click', createTenant);
+    bulkProvisionTenantsBtn.addEventListener('click', bulkProvisionTenants);
+    toggleAdminKeyVisibilityBtn.addEventListener('click', () => {
+      setAdminKeyVisibility(adminKey.type === 'password');
+    });
+    toggleTenantApiKeyVisibilityBtn.addEventListener('click', () => {
+      setTenantApiKeyVisibility(tenantAdminApiKeyInput.type === 'password');
+    });
 
     const today = new Date();
     const weekAgo = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000);
     dateToInput.value = toDateInputValue(today);
     dateFromInput.value = toDateInputValue(weekAgo);
+    setAdminKeyVisibility(false);
+    setTenantApiKeyVisibility(false);
   </script>
 </body>
 </html>

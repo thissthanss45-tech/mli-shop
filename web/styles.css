@@ -189,6 +189,10 @@ input:focus {
   background: #0f172a;
 }
 
+video.card__image {
+  object-fit: cover;
+}
+
 .card__image--detail {
   height: min(420px, 48vw);
 }
@@ -280,6 +284,26 @@ input:focus {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+.media-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.media-thumb {
+  border: 1px solid var(--border);
+  background: rgba(30, 41, 59, 0.82);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.media-thumb--active {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .cart-wrap {

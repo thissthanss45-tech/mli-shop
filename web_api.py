@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 import uvicorn
 from sqlalchemy import func, select, text, or_
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import selectinload
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNotFound
@@ -32,11 +33,31 @@ from config import settings
 from database.db_manager import async_session_maker
 from database.orders_repo import OrdersRepo
 from database.catalog_repo import CatalogRepo
-from models import Product, ProductStock, User, UserRole, CartItem
+from models import Brand, CartItem, Category, Product, ProductStock, User, UserRole
+from models import Tenant, TenantMembership, TenantSettings
+from utils.tenants import (
+    _extract_host,
+    apply_tenant_preset,
+    create_tenant_with_defaults,
+    ensure_default_tenant,
+    ensure_tenant_membership,
+    get_primary_owner_tg_id,
+    get_or_create_tenant_settings,
+    get_tenant_preset,
+    list_tenant_presets,
+    resolve_tenant,
+    seed_tenant_demo_products,
+)
 from utils.erp_report import build_erp_report_xlsx
 from schemas import ProductResponse, WebOrderRequest, WebOrderResponse
 from schemas import WebAIChatRequest, WebAIChatResponse
 from schemas import (
+    AdminBulkProvisionResultRow,
+    AdminBulkProvisionTenantItem,
+    AdminBulkProvisionTenantsRequest,
+    AdminBulkProvisionTenantsResponse,
+    AdminCreateTenantRequest,
+    AdminCreateTenantResponse,
     AdminCreateProductRequest,
     AdminCreateProductResponse,
     AdminMetaResponse,
@@ -44,6 +65,14 @@ from schemas import (
     AdminProductsResponse,
     AdminUpdateProductRequest,
     AdminDeleteProductResponse,
+    AdminTenantSettingsResponse,
+    AdminTenantSettingsUpdateRequest,
+    AdminTenantPresetRow,
+    AdminTenantPresetsResponse,
+    AdminTenantRow,
+    AdminTenantsResponse,
+    ProductMediaResponse,
+    TenantSmokeResponse,
 )
 
 def _load_cors_origins() -> list[str]:
@@ -130,6 +159,59 @@ def _render_prometheus_metrics() -> str:
         lines.append(
             f'app_http_request_duration_seconds_count{{method="{_escape_label(method)}",path="{_escape_label(path)}"}} {duration_count}'
         )
+
+    return "\n".join(lines) + "\n"
+
+
+async def _render_tenant_prometheus_metrics() -> str:
+    lines = [
+        "# HELP app_tenant_products_total Total products per tenant",
+        "# TYPE app_tenant_products_total gauge",
+        "# HELP app_tenant_categories_total Total categories per tenant",
+        "# TYPE app_tenant_categories_total gauge",
+        "# HELP app_tenant_brands_total Total brands per tenant",
+        "# TYPE app_tenant_brands_total gauge",
+        "# HELP app_tenant_owner_memberships_total Owner memberships per tenant",
+        "# TYPE app_tenant_owner_memberships_total gauge",
+        "# HELP app_tenant_staff_memberships_total Staff memberships per tenant",
+        "# TYPE app_tenant_staff_memberships_total gauge",
+        "# HELP app_tenant_has_bot_token Tenant bot token readiness flag",
+        "# TYPE app_tenant_has_bot_token gauge",
+        "# HELP app_tenant_has_admin_api_key Tenant admin api key readiness flag",
+        "# TYPE app_tenant_has_admin_api_key gauge",
+        "# HELP app_tenant_status_active Tenant active status flag",
+        "# TYPE app_tenant_status_active gauge",
+    ]
+
+    async with async_session_maker() as session:
+        tenants = list((await session.execute(select(Tenant).order_by(Tenant.id.asc()))).scalars().all())
+        for tenant in tenants:
+            slug = _escape_label(tenant.slug)
+            title = _escape_label(tenant.title)
+            labels = f'tenant_slug="{slug}",tenant_title="{title}"'
+            products = await session.scalar(select(func.count(Product.id)).where(Product.tenant_id == tenant.id))
+            categories = await session.scalar(select(func.count(Category.id)).where(Category.tenant_id == tenant.id))
+            brands = await session.scalar(select(func.count(Brand.id)).where(Brand.tenant_id == tenant.id))
+            owners = await session.scalar(
+                select(func.count(TenantMembership.id)).where(
+                    TenantMembership.tenant_id == tenant.id,
+                    TenantMembership.role == UserRole.OWNER.value,
+                )
+            )
+            staff = await session.scalar(
+                select(func.count(TenantMembership.id)).where(
+                    TenantMembership.tenant_id == tenant.id,
+                    TenantMembership.role == UserRole.STAFF.value,
+                )
+            )
+            lines.append(f"app_tenant_products_total{{{labels}}} {int(products or 0)}")
+            lines.append(f"app_tenant_categories_total{{{labels}}} {int(categories or 0)}")
+            lines.append(f"app_tenant_brands_total{{{labels}}} {int(brands or 0)}")
+            lines.append(f"app_tenant_owner_memberships_total{{{labels}}} {int(owners or 0)}")
+            lines.append(f"app_tenant_staff_memberships_total{{{labels}}} {int(staff or 0)}")
+            lines.append(f"app_tenant_has_bot_token{{{labels}}} {1 if (tenant.bot_token or '').strip() else 0}")
+            lines.append(f"app_tenant_has_admin_api_key{{{labels}}} {1 if (tenant.admin_api_key or '').strip() else 0}")
+            lines.append(f"app_tenant_status_active{{{labels}}} {1 if tenant.status == 'active' else 0}")
 
     return "\n".join(lines) + "\n"
 
@@ -243,20 +325,49 @@ app.add_middleware(
 app.mount("/web", StaticFiles(directory=WEB_DIR), name="web")
 
 WEB_CHECKOUT_USER_TG_ID = 900000000001
-WEB_ADMIN_KEY = os.getenv("WEB_ADMIN_KEY", "").strip()
-if not WEB_ADMIN_KEY:
-    raise RuntimeError("WEB_ADMIN_KEY must be set in environment and cannot fallback to OWNER_ID")
 
 
-async def _get_or_create_web_user(session) -> User:
+def _build_fallback_tenant() -> Tenant:
+    return Tenant(
+        id=0,
+        slug="default",
+        title="Default Store",
+        status="active",
+        bot_token=settings.bot_token,
+        domain=None,
+        admin_api_key=os.getenv("WEB_ADMIN_KEY", "").strip() or None,
+    )
+
+
+async def _resolve_request_tenant(request: Request, tenant_slug: str | None = Query(default=None, alias="tenant")) -> Tenant:
+    try:
+        async with async_session_maker() as session:
+            tenant = await resolve_tenant(
+                session,
+                slug=request.headers.get("X-Tenant-Slug") or tenant_slug,
+                domain=request.headers.get("X-Tenant-Domain") or request.headers.get("X-Forwarded-Host") or request.headers.get("Host"),
+            )
+            await session.commit()
+            return tenant
+    except OperationalError:
+        return _build_fallback_tenant()
+
+
+async def _get_or_create_web_user(session, tenant: Tenant) -> User:
     stmt = select(User).where(User.tg_id == WEB_CHECKOUT_USER_TG_ID)
     res = await session.execute(stmt)
     user = res.scalar_one_or_none()
+    if user is not None and user.tenant_id != tenant.id:
+        user.tenant_id = tenant.id
+        await session.flush()
+    if user is not None:
+        await ensure_tenant_membership(session, user, tenant.id, UserRole.CLIENT.value)
     if user is not None:
         return user
 
     user = User(
         tg_id=WEB_CHECKOUT_USER_TG_ID,
+        tenant_id=tenant.id,
         username="web_storefront",
         first_name="Web",
         last_name="Storefront",
@@ -265,7 +376,105 @@ async def _get_or_create_web_user(session) -> User:
     )
     session.add(user)
     await session.flush()
+    await ensure_tenant_membership(session, user, tenant.id, UserRole.CLIENT.value)
     return user
+
+
+async def _get_tenant_settings(session, tenant_id: int) -> TenantSettings:
+    return await get_or_create_tenant_settings(session, tenant_id)
+
+
+def _serialize_tenant_settings(tenant: Tenant, settings_row: TenantSettings) -> AdminTenantSettingsResponse:
+    return AdminTenantSettingsResponse(
+        tenant_id=tenant.id,
+        slug=tenant.slug,
+        title=tenant.title,
+        domain=tenant.domain,
+        admin_api_key=tenant.admin_api_key,
+        storefront_title=settings_row.storefront_title,
+        support_label=settings_row.support_label,
+        owner_title=settings_row.owner_title,
+        staff_title=settings_row.staff_title,
+        welcome_text_client=settings_row.welcome_text_client,
+        welcome_text_staff=settings_row.welcome_text_staff,
+        welcome_text_owner=settings_row.welcome_text_owner,
+        button_labels={str(k): str(v) for k, v in (settings_row.button_labels or {}).items()},
+        menu_client=[[str(item) for item in row] for row in (settings_row.menu_client or [])],
+        menu_staff=[[str(item) for item in row] for row in (settings_row.menu_staff or [])],
+        menu_owner=[[str(item) for item in row] for row in (settings_row.menu_owner or [])],
+    )
+
+
+def _serialize_tenant_row(tenant: Tenant, owner_tg_id: int | None = None) -> AdminTenantRow:
+    return AdminTenantRow(
+        tenant_id=tenant.id,
+        slug=tenant.slug,
+        title=tenant.title,
+        domain=tenant.domain,
+        status=tenant.status,
+        owner_tg_id=owner_tg_id,
+        has_bot_token=bool((tenant.bot_token or "").strip()),
+        has_admin_api_key=bool((tenant.admin_api_key or "").strip()),
+    )
+
+
+def _serialize_tenant_preset_row(row: dict[str, object]) -> AdminTenantPresetRow:
+    return AdminTenantPresetRow(
+        key=str(row.get("key") or ""),
+        title=str(row.get("title") or ""),
+        description=str(row.get("description") or ""),
+        category_names=[str(item) for item in list(row.get("category_names", []))],
+        brand_names=[str(item) for item in list(row.get("brand_names", []))],
+        demo_product_titles=[str(item.get("title") or "") for item in list(row.get("demo_products", []))],
+    )
+
+
+async def _create_tenant_from_payload(
+    session,
+    payload: AdminCreateTenantRequest | AdminBulkProvisionTenantItem,
+) -> tuple[Tenant, int | None, int]:
+    slug = (payload.slug or "").strip().lower()
+    title = (payload.title or "").strip()
+    if not slug:
+        raise HTTPException(status_code=400, detail="slug cannot be empty")
+    if not title:
+        raise HTTPException(status_code=400, detail="title cannot be empty")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,62}[a-z0-9]", slug):
+        raise HTTPException(status_code=400, detail="slug must use lowercase latin letters, digits and hyphen")
+
+    preset_key = (payload.preset_key or "").strip().lower() or None
+    if preset_key and get_tenant_preset(preset_key) is None:
+        raise HTTPException(status_code=400, detail="Unknown tenant preset")
+
+    existing_slug = await session.scalar(select(Tenant.id).where(Tenant.slug == slug))
+    if existing_slug is not None:
+        raise HTTPException(status_code=409, detail="slug is already in use")
+
+    domain = _extract_host(payload.domain)
+    if domain:
+        existing_domain = await session.scalar(select(Tenant.id).where(Tenant.domain == domain))
+        if existing_domain is not None:
+            raise HTTPException(status_code=409, detail="domain is already in use")
+
+    tenant, _, _owner_user = await create_tenant_with_defaults(
+        session,
+        slug=slug,
+        title=title,
+        owner_tg_id=payload.owner_tg_id,
+        domain=domain,
+        bot_token=payload.bot_token,
+        admin_api_key=payload.admin_api_key,
+        owner_username=payload.owner_username,
+        owner_first_name=payload.owner_first_name,
+        owner_last_name=payload.owner_last_name,
+    )
+    demo_products_seeded = 0
+    if preset_key:
+        await apply_tenant_preset(session, tenant, preset_key, overwrite=False)
+        demo_products_seeded = await seed_tenant_demo_products(session, tenant, preset_key)
+    await session.flush()
+    owner_tg_id = await get_primary_owner_tg_id(session, tenant.id)
+    return tenant, owner_tg_id, demo_products_seeded
 
 
 def _extract_bearer_token(authorization: str | None = Header(default=None, alias="Authorization")) -> str:
@@ -278,13 +487,37 @@ def _extract_bearer_token(authorization: str | None = Header(default=None, alias
     return token.strip()
 
 
-def _require_admin_access(token: str = Depends(_extract_bearer_token)) -> None:
-    if not secrets.compare_digest(token, WEB_ADMIN_KEY):
+async def _require_admin_access(
+    request: Request,
+    token: str = Depends(_extract_bearer_token),
+    tenant_slug: str | None = Query(default=None, alias="tenant"),
+) -> Tenant:
+    try:
+        async with async_session_maker() as session:
+            tenant = await resolve_tenant(
+                session,
+                slug=request.headers.get("X-Tenant-Slug") or tenant_slug,
+                domain=request.headers.get("X-Tenant-Domain") or request.headers.get("X-Forwarded-Host") or request.headers.get("Host"),
+            )
+            await session.commit()
+    except OperationalError:
+        tenant = _build_fallback_tenant()
+
+    admin_api_key = (tenant.admin_api_key or "").strip()
+    if not admin_api_key or not secrets.compare_digest(token, admin_api_key):
         raise HTTPException(status_code=403, detail="Invalid admin token")
+    return tenant
 
 
-async def _notify_order_to_telegram(order_id: int, full_name: str, phone: str, total_price: float, item_lines: list[str]) -> None:
-    bot = Bot(token=settings.bot_token)
+async def _notify_order_to_telegram(
+    order_id: int,
+    full_name: str,
+    phone: str,
+    total_price: float,
+    item_lines: list[str],
+    tenant_id: int,
+) -> None:
+    bot_token = settings.bot_token
     try:
         admin_text = (
             f"🔔 <b>НОВЫЙ WEB-ЗАКАЗ #{order_id}</b>\n"
@@ -294,30 +527,47 @@ async def _notify_order_to_telegram(order_id: int, full_name: str, phone: str, t
             f"📦 <b>Состав заказа:</b>\n"
             f"{''.join(item_lines)}"
         )
-        try:
-            await bot.send_message(settings.owner_id, admin_text, parse_mode="HTML")
-        except (TelegramForbiddenError, TelegramNotFound, TelegramBadRequest, aiohttp.ClientError) as exc:
-            logger.error("Failed to send web order notification to owner: %s", exc)
-
         async with async_session_maker() as session:
-            staff_stmt = select(User.tg_id).where(User.role == UserRole.STAFF.value)
-            staff_res = await session.execute(staff_stmt)
-            staff_ids = staff_res.scalars().all()
+            tenant = await session.get(Tenant, tenant_id)
+            if tenant and tenant.bot_token:
+                bot_token = tenant.bot_token
+            member_stmt = (
+                select(User.tg_id, TenantMembership.role)
+                .join(TenantMembership, TenantMembership.user_id == User.id)
+                .where(
+                    TenantMembership.tenant_id == tenant_id,
+                    TenantMembership.role.in_([UserRole.OWNER.value, UserRole.STAFF.value]),
+                )
+            )
+            member_res = await session.execute(member_stmt)
+            recipients = member_res.all()
 
-        for staff_id in staff_ids:
-            if staff_id == settings.owner_id:
-                continue
+        bot = Bot(token=bot_token)
+
+        for staff_id, role in recipients:
             try:
                 await bot.send_message(staff_id, admin_text, parse_mode="HTML")
             except (TelegramForbiddenError, TelegramNotFound, TelegramBadRequest, aiohttp.ClientError) as exc:
-                logger.warning("Failed to send web order notification to staff %s: %s", staff_id, exc)
+                logger.warning("Failed to send web order notification to %s %s: %s", role, staff_id, exc)
                 continue
     finally:
-        await bot.session.close()
+        if 'bot' in locals():
+            await bot.session.close()
 
 
 def _map_product(product: Product) -> ProductResponse:
-    image_url = f"/api/products/{product.id}/image" if product.photos else None
+    media_items = sorted(product.photos, key=lambda item: item.id)
+    primary_media = media_items[0] if media_items else None
+    image_url = f"/api/products/{product.id}/image" if any((photo.media_type or "photo") == "photo" for photo in media_items) else None
+    media = [
+        ProductMediaResponse(
+            id=item.id,
+            media_type="video" if (item.media_type or "photo") == "video" else "photo",
+            url=f"/api/products/{product.id}/media/{item.id}",
+            is_primary=bool(primary_media and primary_media.id == item.id),
+        )
+        for item in media_items
+    ]
     return ProductResponse(
         id=product.id,
         name=product.title,
@@ -329,7 +579,32 @@ def _map_product(product: Product) -> ProductResponse:
         brand_name=product.brand.name if product.brand else None,
         stock=sum(item.quantity for item in product.stock),
         image_url=image_url,
+        primary_media_url=(f"/api/products/{product.id}/media/{primary_media.id}" if primary_media else None),
+        primary_media_type=((primary_media.media_type or "photo") if primary_media else None),
+        media=media,
     )
+
+
+async def _download_telegram_file(bot_token: str, file_id: str) -> tuple[bytes, str]:
+    get_file_url = f"https://api.telegram.org/bot{bot_token}/getFile"
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as http:
+        async with http.get(get_file_url, params={"file_id": file_id}) as tg_resp:
+            if tg_resp.status != 200:
+                raise HTTPException(status_code=502, detail="Failed to load media metadata")
+            payload = await tg_resp.json()
+            if not payload.get("ok"):
+                raise HTTPException(status_code=502, detail="Invalid media metadata response")
+            file_path = payload.get("result", {}).get("file_path")
+            if not file_path:
+                raise HTTPException(status_code=404, detail="Media path not found")
+
+        file_url = f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
+        async with http.get(file_url) as file_resp:
+            if file_resp.status != 200:
+                raise HTTPException(status_code=502, detail="Failed to download product media")
+            content_type = file_resp.headers.get("Content-Type", "application/octet-stream")
+            content = await file_resp.read()
+    return content, content_type
 
 
 @app.get("/")
@@ -372,13 +647,53 @@ async def ping() -> dict[str, str]:
 @app.get("/api/health")
 async def health() -> dict[str, str | int]:
     async with async_session_maker() as session:
+        tenant = await ensure_default_tenant(session)
         await session.execute(text("SELECT 1"))
-        total_products = await session.scalar(select(func.count(Product.id)))
+        total_products = await session.scalar(select(func.count(Product.id)).where(Product.tenant_id == tenant.id))
     return {
         "status": "ok",
         "database": "connected",
         "products": int(total_products or 0),
     }
+
+
+@app.get("/api/health/tenant", response_model=TenantSmokeResponse)
+async def tenant_health_smoke(tenant: Tenant = Depends(_resolve_request_tenant)) -> TenantSmokeResponse:
+    async with async_session_maker() as session:
+        db_tenant = await session.get(Tenant, tenant.id)
+        if db_tenant is None:
+            raise HTTPException(status_code=404, detail="Tenant not found")
+        await session.execute(text("SELECT 1"))
+        categories = await session.scalar(select(func.count(Category.id)).where(Category.tenant_id == db_tenant.id))
+        brands = await session.scalar(select(func.count(Brand.id)).where(Brand.tenant_id == db_tenant.id))
+        products = await session.scalar(select(func.count(Product.id)).where(Product.tenant_id == db_tenant.id))
+        owner_memberships = await session.scalar(
+            select(func.count(TenantMembership.id)).where(
+                TenantMembership.tenant_id == db_tenant.id,
+                TenantMembership.role == UserRole.OWNER.value,
+            )
+        )
+        staff_memberships = await session.scalar(
+            select(func.count(TenantMembership.id)).where(
+                TenantMembership.tenant_id == db_tenant.id,
+                TenantMembership.role == UserRole.STAFF.value,
+            )
+        )
+    return TenantSmokeResponse(
+        status="ok",
+        tenant_id=db_tenant.id,
+        tenant_slug=db_tenant.slug,
+        tenant_title=db_tenant.title,
+        tenant_status=db_tenant.status,
+        domain=db_tenant.domain,
+        has_bot_token=bool((db_tenant.bot_token or "").strip()),
+        has_admin_api_key=bool((db_tenant.admin_api_key or "").strip()),
+        categories=int(categories or 0),
+        brands=int(brands or 0),
+        products=int(products or 0),
+        owner_memberships=int(owner_memberships or 0),
+        staff_memberships=int(staff_memberships or 0),
+    )
 
 
 @app.get("/api/metrics")
@@ -387,11 +702,18 @@ async def metrics() -> Response:
     return Response(content=payload, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
+@app.get("/api/metrics/tenants")
+async def tenant_metrics() -> Response:
+    payload = await _render_tenant_prometheus_metrics()
+    return Response(content=payload, media_type="text/plain; version=0.0.4; charset=utf-8")
+
+
 @app.get("/api/products", response_model=list[ProductResponse])
 async def get_products(
     limit: int = Query(default=20, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     category_id: int | None = Query(default=None, ge=1),
+    tenant: Tenant = Depends(_resolve_request_tenant),
 ) -> list[ProductResponse]:
     async with async_session_maker() as session:
         stmt = select(Product).options(
@@ -399,7 +721,7 @@ async def get_products(
             selectinload(Product.photos),
             selectinload(Product.category),
             selectinload(Product.brand),
-        )
+        ).where(Product.tenant_id == tenant.id)
         if category_id is not None:
             stmt = stmt.where(Product.category_id == category_id)
         stmt = stmt.order_by(Product.id).offset(offset).limit(limit)
@@ -409,14 +731,14 @@ async def get_products(
 
 
 @app.get("/api/products/{product_id}", response_model=ProductResponse)
-async def get_product_by_id(product_id: int) -> ProductResponse:
+async def get_product_by_id(product_id: int, tenant: Tenant = Depends(_resolve_request_tenant)) -> ProductResponse:
     async with async_session_maker() as session:
         stmt = select(Product).options(
             selectinload(Product.stock),
             selectinload(Product.photos),
             selectinload(Product.category),
             selectinload(Product.brand),
-        ).where(Product.id == product_id)
+        ).where(Product.id == product_id, Product.tenant_id == tenant.id)
         result = await session.execute(stmt)
         product = result.scalar_one_or_none()
         if product is None:
@@ -425,9 +747,9 @@ async def get_product_by_id(product_id: int) -> ProductResponse:
 
 
 @app.get("/api/products/{product_id}/image")
-async def get_product_image(product_id: int) -> Response:
+async def get_product_image(product_id: int, tenant: Tenant = Depends(_resolve_request_tenant)) -> Response:
     async with async_session_maker() as session:
-        stmt = select(Product).options(selectinload(Product.photos)).where(Product.id == product_id)
+        stmt = select(Product).options(selectinload(Product.photos)).where(Product.id == product_id, Product.tenant_id == tenant.id)
         result = await session.execute(stmt)
         product = result.scalar_one_or_none()
         if product is None:
@@ -435,32 +757,38 @@ async def get_product_image(product_id: int) -> Response:
         if not product.photos:
             raise HTTPException(status_code=404, detail="Product image not found")
 
-        file_id = product.photos[0].file_id
+        image = next((photo for photo in product.photos if (photo.media_type or "photo") == "photo"), None)
+        if image is None:
+            raise HTTPException(status_code=404, detail="Product image not found")
 
-    get_file_url = f"https://api.telegram.org/bot{settings.bot_token}/getFile"
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as http:
-        async with http.get(get_file_url, params={"file_id": file_id}) as tg_resp:
-            if tg_resp.status != 200:
-                raise HTTPException(status_code=502, detail="Failed to load image metadata")
-            payload = await tg_resp.json()
-            if not payload.get("ok"):
-                raise HTTPException(status_code=502, detail="Invalid image metadata response")
-            file_path = payload.get("result", {}).get("file_path")
-            if not file_path:
-                raise HTTPException(status_code=404, detail="Image path not found")
+        file_id = image.file_id
 
-        file_url = f"https://api.telegram.org/file/bot{settings.bot_token}/{file_path}"
-        async with http.get(file_url) as file_resp:
-            if file_resp.status != 200:
-                raise HTTPException(status_code=502, detail="Failed to download product image")
-            content_type = file_resp.headers.get("Content-Type", "image/jpeg")
-            content = await file_resp.read()
+    bot_token = tenant.bot_token or settings.bot_token
+    content, content_type = await _download_telegram_file(bot_token, file_id)
 
     return Response(content=content, media_type=content_type)
 
 
+@app.get("/api/products/{product_id}/media/{media_id}")
+async def get_product_media(product_id: int, media_id: int, tenant: Tenant = Depends(_resolve_request_tenant)) -> Response:
+    async with async_session_maker() as session:
+        stmt = select(Product).options(selectinload(Product.photos)).where(Product.id == product_id, Product.tenant_id == tenant.id)
+        result = await session.execute(stmt)
+        product = result.scalar_one_or_none()
+        if product is None:
+            raise HTTPException(status_code=404, detail="Product not found")
+
+        media = next((item for item in product.photos if item.id == media_id), None)
+        if media is None:
+            raise HTTPException(status_code=404, detail="Product media not found")
+
+    bot_token = tenant.bot_token or settings.bot_token
+    content, content_type = await _download_telegram_file(bot_token, media.file_id)
+    return Response(content=content, media_type=content_type)
+
+
 @app.post("/api/orders", response_model=WebOrderResponse)
-async def create_web_order(payload: WebOrderRequest) -> WebOrderResponse:
+async def create_web_order(payload: WebOrderRequest, tenant: Tenant = Depends(_resolve_request_tenant)) -> WebOrderResponse:
     if not payload.items:
         raise HTTPException(status_code=400, detail="Cart is empty")
 
@@ -469,7 +797,7 @@ async def create_web_order(payload: WebOrderRequest) -> WebOrderResponse:
         raise HTTPException(status_code=400, detail="Invalid phone number")
 
     async with async_session_maker() as session:
-        user = await _get_or_create_web_user(session)
+        user = await _get_or_create_web_user(session, tenant)
         cart_items_for_order: list[CartItem] = []
         item_lines: list[str] = []
 
@@ -479,7 +807,7 @@ async def create_web_order(payload: WebOrderRequest) -> WebOrderResponse:
             stmt = select(Product).options(
                 selectinload(Product.stock),
                 selectinload(Product.brand),
-            ).where(Product.id == item.product_id)
+            ).where(Product.id == item.product_id, Product.tenant_id == tenant.id)
             res = await session.execute(stmt)
             product = res.scalar_one_or_none()
             if product is None:
@@ -517,7 +845,7 @@ async def create_web_order(payload: WebOrderRequest) -> WebOrderResponse:
             sku_part = f" [{product.sku}]" if product.sku else ""
             item_lines.append(f"— {brand_name} {product.title}{sku_part} ({selected_size}) x{quantity}\n")
 
-        orders_repo = OrdersRepo(session)
+        orders_repo = OrdersRepo(session, tenant_id=tenant.id)
         order = await orders_repo.create_order(
             user=user,
             full_name=payload.full_name.strip() or "Клиент сайта",
@@ -538,6 +866,7 @@ async def create_web_order(payload: WebOrderRequest) -> WebOrderResponse:
         phone=payload.phone.strip(),
         total_price=total_price,
         item_lines=item_lines,
+        tenant_id=tenant.id,
     )
 
     return WebOrderResponse(
@@ -549,9 +878,9 @@ async def create_web_order(payload: WebOrderRequest) -> WebOrderResponse:
 
 
 @app.get("/api/admin/meta", response_model=AdminMetaResponse)
-async def get_admin_meta(_: None = Depends(_require_admin_access)) -> AdminMetaResponse:
+async def get_admin_meta(tenant: Tenant = Depends(_require_admin_access)) -> AdminMetaResponse:
     async with async_session_maker() as session:
-        repo = CatalogRepo(session)
+        repo = CatalogRepo(session, tenant_id=tenant.id)
         categories = await repo.list_categories()
         brands = await repo.list_brands()
 
@@ -564,7 +893,7 @@ async def get_admin_meta(_: None = Depends(_require_admin_access)) -> AdminMetaR
 @app.post("/api/admin/products", response_model=AdminCreateProductResponse)
 async def create_product_from_admin(
     payload: AdminCreateProductRequest,
-    _: None = Depends(_require_admin_access),
+    tenant: Tenant = Depends(_require_admin_access),
 ) -> AdminCreateProductResponse:
     title = (payload.title or "").strip()
     category_name = (payload.category_name or "").strip()
@@ -585,7 +914,7 @@ async def create_product_from_admin(
         raise HTTPException(status_code=400, detail="Prices must be >= 0")
 
     async with async_session_maker() as session:
-        repo = CatalogRepo(session)
+        repo = CatalogRepo(session, tenant_id=tenant.id)
         category = await repo.get_or_create_category(category_name)
         brand = await repo.get_or_create_brand(brand_name)
         product = await repo.create_product(
@@ -615,12 +944,12 @@ async def create_product_from_admin(
 
 @app.get("/api/admin/products", response_model=AdminProductsResponse)
 async def list_admin_products(
-    _: None = Depends(_require_admin_access),
+    tenant: Tenant = Depends(_require_admin_access),
     limit: int = Query(default=50, ge=1, le=300),
     offset: int = Query(default=0, ge=0),
 ) -> AdminProductsResponse:
     async with async_session_maker() as session:
-        total_stmt = select(func.count(Product.id))
+        total_stmt = select(func.count(Product.id)).where(Product.tenant_id == tenant.id)
         total = int(await session.scalar(total_stmt) or 0)
 
         stmt = (
@@ -630,6 +959,7 @@ async def list_admin_products(
                 selectinload(Product.category),
                 selectinload(Product.brand),
             )
+            .where(Product.tenant_id == tenant.id)
             .order_by(Product.id.desc())
             .offset(offset)
             .limit(limit)
@@ -658,10 +988,10 @@ async def list_admin_products(
 async def update_admin_product(
     product_id: int,
     payload: AdminUpdateProductRequest,
-    _: None = Depends(_require_admin_access),
+    tenant: Tenant = Depends(_require_admin_access),
 ) -> AdminCreateProductResponse:
     async with async_session_maker() as session:
-        repo = CatalogRepo(session)
+        repo = CatalogRepo(session, tenant_id=tenant.id)
         stmt = (
             select(Product)
             .options(
@@ -669,7 +999,7 @@ async def update_admin_product(
                 selectinload(Product.category),
                 selectinload(Product.brand),
             )
-            .where(Product.id == product_id)
+            .where(Product.id == product_id, Product.tenant_id == tenant.id)
         )
         result = await session.execute(stmt)
         product = result.scalar_one_or_none()
@@ -729,16 +1059,184 @@ async def update_admin_product(
 @app.delete("/api/admin/products/{product_id}", response_model=AdminDeleteProductResponse)
 async def delete_admin_product(
     product_id: int,
-    _: None = Depends(_require_admin_access),
+    tenant: Tenant = Depends(_require_admin_access),
 ) -> AdminDeleteProductResponse:
     async with async_session_maker() as session:
-        repo = CatalogRepo(session)
+        repo = CatalogRepo(session, tenant_id=tenant.id)
         deleted = await repo.delete_product(product_id)
         if not deleted:
             raise HTTPException(status_code=404, detail="Product not found")
         await session.commit()
 
     return AdminDeleteProductResponse(status="ok", product_id=product_id, message="Product deleted")
+
+
+@app.get("/api/admin/tenant-settings", response_model=AdminTenantSettingsResponse)
+async def get_admin_tenant_settings(tenant: Tenant = Depends(_require_admin_access)) -> AdminTenantSettingsResponse:
+    async with async_session_maker() as session:
+        db_tenant = await session.get(Tenant, tenant.id) if tenant.id else tenant
+        settings_row = await _get_tenant_settings(session, tenant.id)
+        return _serialize_tenant_settings(db_tenant or tenant, settings_row)
+
+
+@app.put("/api/admin/tenant-settings", response_model=AdminTenantSettingsResponse)
+async def update_admin_tenant_settings(
+    payload: AdminTenantSettingsUpdateRequest,
+    tenant: Tenant = Depends(_require_admin_access),
+) -> AdminTenantSettingsResponse:
+    async with async_session_maker() as session:
+        db_tenant = await session.get(Tenant, tenant.id)
+        if db_tenant is None:
+            raise HTTPException(status_code=404, detail="Tenant not found")
+        settings_row = await _get_tenant_settings(session, tenant.id)
+
+        if payload.slug is not None:
+            new_slug = (payload.slug or "").strip().lower()
+            if not new_slug:
+                raise HTTPException(status_code=400, detail="slug cannot be empty")
+            if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,62}[a-z0-9]", new_slug):
+                raise HTTPException(status_code=400, detail="slug must use lowercase latin letters, digits and hyphen")
+            existing_slug_stmt = select(Tenant.id).where(Tenant.slug == new_slug, Tenant.id != db_tenant.id)
+            existing_slug = await session.scalar(existing_slug_stmt)
+            if existing_slug is not None:
+                raise HTTPException(status_code=409, detail="slug is already in use")
+            db_tenant.slug = new_slug
+
+        if payload.title is not None:
+            db_tenant.title = payload.title.strip() or db_tenant.title
+        if payload.domain is not None:
+            normalized_domain = _extract_host(payload.domain)
+            if normalized_domain:
+                existing_domain_stmt = select(Tenant.id).where(Tenant.domain == normalized_domain, Tenant.id != db_tenant.id)
+                existing_domain = await session.scalar(existing_domain_stmt)
+                if existing_domain is not None:
+                    raise HTTPException(status_code=409, detail="domain is already in use")
+            db_tenant.domain = normalized_domain or None
+        if payload.admin_api_key is not None:
+            db_tenant.admin_api_key = (payload.admin_api_key or "").strip() or None
+        if payload.storefront_title is not None:
+            settings_row.storefront_title = payload.storefront_title.strip() or settings_row.storefront_title
+        if payload.support_label is not None:
+            settings_row.support_label = payload.support_label.strip() or settings_row.support_label
+        if payload.owner_title is not None:
+            settings_row.owner_title = payload.owner_title.strip() or settings_row.owner_title
+        if payload.staff_title is not None:
+            settings_row.staff_title = payload.staff_title.strip() or settings_row.staff_title
+        if payload.welcome_text_client is not None:
+            settings_row.welcome_text_client = payload.welcome_text_client.strip() or None
+        if payload.welcome_text_staff is not None:
+            settings_row.welcome_text_staff = payload.welcome_text_staff.strip() or None
+        if payload.welcome_text_owner is not None:
+            settings_row.welcome_text_owner = payload.welcome_text_owner.strip() or None
+        if payload.button_labels is not None:
+            settings_row.button_labels = {str(k): str(v) for k, v in payload.button_labels.items()}
+        if payload.menu_client is not None:
+            settings_row.menu_client = [[str(item) for item in row] for row in payload.menu_client]
+        if payload.menu_staff is not None:
+            settings_row.menu_staff = [[str(item) for item in row] for row in payload.menu_staff]
+        if payload.menu_owner is not None:
+            settings_row.menu_owner = [[str(item) for item in row] for row in payload.menu_owner]
+
+        await session.commit()
+        await session.refresh(db_tenant)
+        await session.refresh(settings_row)
+        return _serialize_tenant_settings(db_tenant, settings_row)
+
+
+@app.post("/api/admin/tenant-settings/regenerate-key", response_model=AdminTenantSettingsResponse)
+async def regenerate_admin_tenant_api_key(tenant: Tenant = Depends(_require_admin_access)) -> AdminTenantSettingsResponse:
+    async with async_session_maker() as session:
+        db_tenant = await session.get(Tenant, tenant.id)
+        if db_tenant is None:
+            raise HTTPException(status_code=404, detail="Tenant not found")
+        settings_row = await _get_tenant_settings(session, tenant.id)
+        db_tenant.admin_api_key = secrets.token_urlsafe(24)
+        await session.commit()
+        await session.refresh(db_tenant)
+        return _serialize_tenant_settings(db_tenant, settings_row)
+
+
+@app.delete("/api/admin/tenant-settings", response_model=AdminTenantSettingsResponse)
+async def reset_admin_tenant_settings(tenant: Tenant = Depends(_require_admin_access)) -> AdminTenantSettingsResponse:
+    async with async_session_maker() as session:
+        db_tenant = await session.get(Tenant, tenant.id) if tenant.id else tenant
+        await session.delete((await _get_tenant_settings(session, tenant.id)))
+        await session.flush()
+        settings_row = await _get_tenant_settings(session, tenant.id)
+        await session.commit()
+        return _serialize_tenant_settings(db_tenant or tenant, settings_row)
+
+
+@app.get("/api/admin/tenants", response_model=AdminTenantsResponse)
+async def list_admin_tenants(_: Tenant = Depends(_require_admin_access)) -> AdminTenantsResponse:
+    async with async_session_maker() as session:
+        stmt = select(Tenant).order_by(Tenant.id.asc())
+        tenants = list((await session.execute(stmt)).scalars().all())
+        items: list[AdminTenantRow] = []
+        for tenant in tenants:
+            owner_tg_id = await get_primary_owner_tg_id(session, tenant.id)
+            items.append(_serialize_tenant_row(tenant, owner_tg_id))
+        return AdminTenantsResponse(items=items, total=len(items))
+
+
+@app.get("/api/admin/tenant-presets", response_model=AdminTenantPresetsResponse)
+async def list_admin_tenant_presets(_: Tenant = Depends(_require_admin_access)) -> AdminTenantPresetsResponse:
+    items = [_serialize_tenant_preset_row(item) for item in list_tenant_presets()]
+    return AdminTenantPresetsResponse(items=items, total=len(items))
+
+
+@app.post("/api/admin/tenants", response_model=AdminCreateTenantResponse, status_code=201)
+async def create_admin_tenant(
+    payload: AdminCreateTenantRequest,
+    _: Tenant = Depends(_require_admin_access),
+) -> AdminCreateTenantResponse:
+    async with async_session_maker() as session:
+        tenant, owner_tg_id, demo_products_seeded = await _create_tenant_from_payload(session, payload)
+        await session.commit()
+        return AdminCreateTenantResponse(
+            status="ok",
+            tenant=_serialize_tenant_row(tenant, owner_tg_id),
+            admin_api_key=tenant.admin_api_key,
+            demo_products_seeded=demo_products_seeded,
+            message="Tenant created",
+        )
+
+
+@app.post("/api/admin/tenants/bulk-provision", response_model=AdminBulkProvisionTenantsResponse, status_code=201)
+async def bulk_provision_admin_tenants(
+    payload: AdminBulkProvisionTenantsRequest,
+    _: Tenant = Depends(_require_admin_access),
+) -> AdminBulkProvisionTenantsResponse:
+    if not payload.items:
+        raise HTTPException(status_code=400, detail="items cannot be empty")
+
+    seen_slugs: set[str] = set()
+    for item in payload.items:
+        slug = (item.slug or "").strip().lower()
+        if slug in seen_slugs:
+            raise HTTPException(status_code=400, detail="Duplicate slug in bulk payload")
+        seen_slugs.add(slug)
+
+    created: list[AdminBulkProvisionResultRow] = []
+    async with async_session_maker() as session:
+        for item in payload.items:
+            tenant, owner_tg_id, demo_products_seeded = await _create_tenant_from_payload(session, item)
+            created.append(
+                AdminBulkProvisionResultRow(
+                    preset_key=(item.preset_key or "").strip().lower() or None,
+                    tenant=_serialize_tenant_row(tenant, owner_tg_id),
+                    admin_api_key=tenant.admin_api_key,
+                    demo_products_seeded=demo_products_seeded,
+                )
+            )
+        await session.commit()
+
+    return AdminBulkProvisionTenantsResponse(
+        status="ok",
+        created=created,
+        total_created=len(created),
+        message="Bulk tenant provisioning completed",
+    )
 
 
 @app.get("/api/admin/reports/period.xlsx")
@@ -818,7 +1316,7 @@ async def _request_ai_web(messages_payload: list[dict[str, str]]) -> str:
         raise HTTPException(status_code=502, detail="Invalid AI response format")
 
 
-async def _build_catalog_context_for_ai(user_message: str) -> str:
+async def _build_catalog_context_for_ai(user_message: str, tenant_id: int) -> str:
     query = (user_message or "").strip()
     query_tokens = [token for token in re.findall(r"[\w-]+", query.lower()) if len(token) > 2]
 
@@ -830,6 +1328,7 @@ async def _build_catalog_context_for_ai(user_message: str) -> str:
                 selectinload(Product.category),
                 selectinload(Product.brand),
             )
+            .where(Product.tenant_id == tenant_id)
         )
 
         if query_tokens:
@@ -852,6 +1351,7 @@ async def _build_catalog_context_for_ai(user_message: str) -> str:
                     selectinload(Product.category),
                     selectinload(Product.brand),
                 )
+                .where(Product.tenant_id == tenant_id)
                 .order_by(Product.id.desc())
                 .limit(8)
             )
@@ -875,19 +1375,19 @@ async def _build_catalog_context_for_ai(user_message: str) -> str:
 
 
 @app.post("/api/ai/chat", response_model=WebAIChatResponse)
-async def web_ai_chat(payload: WebAIChatRequest) -> WebAIChatResponse:
+async def web_ai_chat(payload: WebAIChatRequest, tenant: Tenant = Depends(_resolve_request_tenant)) -> WebAIChatResponse:
     user_message = (payload.message or "").strip()
     if not user_message:
         raise HTTPException(status_code=400, detail="Message is empty")
 
     safe_user_message = escape(user_message)
-    catalog_context = await _build_catalog_context_for_ai(user_message)
+    catalog_context = await _build_catalog_context_for_ai(user_message, tenant.id)
     history = payload.history[-20:] if payload.history else []
     messages_payload: list[dict[str, str]] = [
         {
             "role": "system",
             "content": (
-                "Ты AI-консультант магазина MLI. Отвечай кратко, по делу и помогай выбрать товар. "
+                f"Ты AI-консультант магазина {tenant.title}. Отвечай кратко, по делу и помогай выбрать товар. "
                 "Используй только актуальные данные каталога ниже, не выдумывай наличие и цену.\n\n"
                 f"Контекст каталога:\n{catalog_context}"
             ),

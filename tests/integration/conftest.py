@@ -39,6 +39,7 @@ os.environ.setdefault("REDIS_URL", "redis://localhost:0/0")
 import web_api as _web_api  # noqa: E402
 from database.db_manager import Base  # noqa: E402
 from models import Brand, Category, Product, ProductStock  # noqa: E402
+from utils.tenants import ensure_default_tenant  # noqa: E402
 
 # ── Constants ──────────────────────────────────────────────────────────────
 ADMIN_KEY = "test-admin-key"
@@ -80,13 +81,15 @@ async def _seed_product(
 ) -> dict:
     """Seed one product with stock; return a dict of IDs."""
     async with maker() as session:
-        cat = Category(name=category_name)
-        brand = Brand(name=brand_name)
+        tenant = await ensure_default_tenant(session)
+        cat = Category(name=category_name, tenant_id=tenant.id)
+        brand = Brand(name=brand_name, tenant_id=tenant.id)
         session.add_all([cat, brand])
         await session.flush()
 
         product_sku = sku or f"{brand_name[:3].upper()}-000001"
         product = Product(
+            tenant_id=tenant.id,
             title=title,
             description="Integration test product",
             purchase_price=Decimal(str(purchase_price)),
@@ -98,7 +101,7 @@ async def _seed_product(
         session.add(product)
         await session.flush()
 
-        stock = ProductStock(product_id=product.id, size=size, quantity=quantity)
+        stock = ProductStock(tenant_id=tenant.id, product_id=product.id, size=size, quantity=quantity)
         session.add(stock)
         await session.commit()
 

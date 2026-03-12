@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import String, Integer, DateTime, Text, Numeric, ForeignKey
+from sqlalchemy import String, Integer, DateTime, Text, Numeric, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database.db_manager import Base
@@ -12,9 +12,18 @@ from database.db_manager import Base
 class Category(Base):
     """Модель категории товаров."""
     __tablename__ = "categories"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_categories_tenant_name"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    tenant_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
     
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -36,9 +45,18 @@ class Category(Base):
 class Brand(Base):
     """Модель бренда."""
     __tablename__ = "brands"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_brands_tenant_name"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    tenant_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
     
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -60,9 +78,18 @@ class Brand(Base):
 class Product(Base):
     """Модель товара."""
     __tablename__ = "products"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "sku", name="uq_products_tenant_sku"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    sku: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    tenant_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    sku: Mapped[str] = mapped_column(String(64), nullable=False)
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     
@@ -140,8 +167,17 @@ class Product(Base):
 class ProductStock(Base):
     """Модель остатков товара по размерам."""
     __tablename__ = "product_stock"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "product_id", "size", name="uq_product_stock_tenant_product_size"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     product_id: Mapped[int] = mapped_column(
         Integer,
         ForeignKey("products.id", ondelete="CASCADE"),
@@ -173,16 +209,23 @@ class ProductStock(Base):
 
 
 class Photo(Base):
-    """Модель фотографии товара."""
+    """Модель медиа товара."""
     __tablename__ = "photos"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     product_id: Mapped[int] = mapped_column(
         Integer,
         ForeignKey("products.id", ondelete="CASCADE"),
         nullable=False
     )
     file_id: Mapped[str] = mapped_column(String(500), nullable=False)
+    media_type: Mapped[str] = mapped_column(String(16), nullable=False, default="photo", server_default="photo")
     
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -197,4 +240,4 @@ class Photo(Base):
     )
 
     def __repr__(self) -> str:
-        return f"<Photo(id={self.id}, product_id={self.product_id})>"
+        return f"<Photo(id={self.id}, product_id={self.product_id}, media_type='{self.media_type}')>"

@@ -15,6 +15,7 @@ def build_active_order_kb(
     order_id: int,
     user_id: int,
     sku_items: list[tuple[str, int]],
+    include_profile_button: bool = True,
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
 
@@ -26,15 +27,16 @@ def build_active_order_kb(
             )
         ])
 
-    rows.append(
-        [
-            InlineKeyboardButton(text="👤 Профиль", url=f"tg://user?id={user_id}"),
-            InlineKeyboardButton(
-                text="✉️ Ответить через бота",
-                callback_data=f"admin_reply_{user_id}_{order_id}",
-            ),
-        ]
+    contact_row: list[InlineKeyboardButton] = []
+    if include_profile_button:
+        contact_row.append(InlineKeyboardButton(text="👤 Профиль", url=f"tg://user?id={user_id}"))
+    contact_row.append(
+        InlineKeyboardButton(
+            text="✉️ Ответить через бота",
+            callback_data=f"admin_reply_{user_id}_{order_id}",
+        )
     )
+    rows.append(contact_row)
     rows.append(
         [
             InlineKeyboardButton(text="✅ Выполнен", callback_data=f"order:done:{order_id}"),

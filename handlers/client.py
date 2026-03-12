@@ -27,12 +27,21 @@ from config import settings
 from database.catalog_repo import CatalogRepo
 from database.orders_repo import OrdersRepo
 from models import Category, Brand, Product, User, CartItem, UserRole, OrderStatus
-from models.users import normalize_role
 from utils.error_policy import safe_delete_message, safe_edit_text
+from utils.tenants import (
+    get_membership_for_user,
+    get_or_create_default_tenant_user,
+    get_primary_owner_tg_id,
+    get_runtime_tenant_role_for_tg_id,
+    get_runtime_tenant,
+    list_tenant_recipient_ids,
+    list_tenant_user_ids_by_role,
+)
 
 client_router = Router()
 logger = logging.getLogger(__name__)
 
+CLIENT_CATEGORIES_PAGE_SIZE = 5
 CLIENT_HISTORY_PAGE_SIZE = 4
 CLIENT_ACTIVE_PAGE_SIZE = 4
 
@@ -41,6 +50,7 @@ CLIENT_ACTIVE_PAGE_SIZE = 4
 class ClientStates(StatesGroup):
     # Состояние для добавления в корзину
     waiting_for_size = State()
+    waiting_for_quantity = State()
     
     # Состояния для оформления заказа
     order_waiting_for_name = State()
@@ -92,11 +102,32 @@ def _build_support_reply_kb(client_id: int, can_block: bool, is_blocked: bool) -
 
 # ---------- Клавиатуры ----------
 
-def build_categories_kb(categories: list[Category]) -> InlineKeyboardBuilder:
+def build_categories_kb(
+    categories: list[Category],
+    page: int,
+    total_count: int,
+    page_size: int,
+) -> InlineKeyboardBuilder:
     kb = InlineKeyboardBuilder()
+    layout: list[int] = []
     for c in categories:
-        kb.button(text=c.name, callback_data=f"cat:{c.id}")
-    kb.adjust(1)
+        kb.button(text=c.name, callback_data=f"cat:{page}:{c.id}")
+        layout.append(1)
+
+    total_pages = max(1, (total_count + page_size - 1) // page_size)
+    if total_pages > 1:
+        nav_count = 0
+        if page > 1:
+            kb.button(text="⬅️", callback_data=f"catpage:{page - 1}")
+            nav_count += 1
+        kb.button(text=f"{page}/{total_pages}", callback_data="catalog:noop")
+        nav_count += 1
+        if page < total_pages:
+            kb.button(text="➡️", callback_data=f"catpage:{page + 1}")
+            nav_count += 1
+        layout.append(max(1, nav_count))
+
+    kb.adjust(*layout)
     return kb
 
 def build_brands_kb(
@@ -105,6 +136,7 @@ def build_brands_kb(
     page: int,
     total_count: int,
     page_size: int,
+    source_category_page: int,
 ) -> InlineKeyboardBuilder:
     kb = InlineKeyboardBuilder()
     for b in brands:
@@ -113,15 +145,15 @@ def build_brands_kb(
     total_pages = (total_count + page_size - 1) // page_size
     nav_count = 0
     if page > 1:
-        kb.button(text="⬅️", callback_data=f"brandpage:{category_id}:{page-1}")
+        kb.button(text="⬅️", callback_data=f"brandpage:{source_category_page}:{category_id}:{page-1}")
         nav_count += 1
-    kb.button(text=f"{page}/{total_pages}", callback_data="ignore")
+    kb.button(text=f"{page}/{total_pages}", callback_data="catalog:noop")
     nav_count += 1
     if page < total_pages:
-        kb.button(text="➡️", callback_data=f"brandpage:{category_id}:{page+1}")
+        kb.button(text="➡️", callback_data=f"brandpage:{source_category_page}:{category_id}:{page+1}")
         nav_count += 1
 
-    kb.button(text="⬅ Назад", callback_data="back:categories")
+    kb.button(text="⬅ Назад", callback_data=f"back:categories:{source_category_page}")
 
     layout = [1] * max(1, len(brands))
     layout.append(max(1, nav_count))
@@ -170,17 +202,26 @@ def build_products_kb(
 
 def build_cart_kb(items: list[CartItem]) -> InlineKeyboardBuilder:
     kb = InlineKeyboardBuilder()
+    layout: list[int] = []
     if items:
         kb.button(text="✅ Оформить заказ", callback_data="order:start")
+        layout.append(1)
     
     for it in items:
+        kb.button(text="-1", callback_data=f"cart:qty:{it.id}:-1")
+        kb.button(text=f"{it.quantity} шт.", callback_data="cart:noop")
+        kb.button(text="+1", callback_data=f"cart:qty:{it.id}:1")
+        layout.append(3)
+
         title = it.product.title if it.product else f"ID {it.product_id}"
         sku = it.product.sku if it.product else None
         title_with_sku = f"{title} [{sku}]" if sku else title
         kb.button(text=f"🗑 Удалить: {title_with_sku} ({it.size})", callback_data=f"cart:del:{it.id}")
+        layout.append(1)
     
     kb.button(text="⬅ В каталог", callback_data="back:categories")
-    kb.adjust(1)
+    layout.append(1)
+    kb.adjust(*layout)
     return kb
 
 
@@ -228,6 +269,11 @@ def _build_client_order_cancel_kb(order_id: int, confirming: bool = False) -> In
         kb.button(text="🗑 Отменить заказ", callback_data=f"client:order:cancel_confirm:{order_id}")
         kb.adjust(1)
     return kb
+
+
+async def _get_catalog_repo(session: AsyncSession) -> CatalogRepo:
+    tenant = await get_runtime_tenant(session)
+    return CatalogRepo(session, tenant_id=tenant.id)
 
 
 async def _render_client_orders_history(
@@ -327,15 +373,50 @@ async def _render_client_orders_history(
 
 @client_router.message(Command("catalog"))
 async def cmd_catalog(message: Message, session: AsyncSession) -> None:
-    repo = CatalogRepo(session)
-    categories = await repo.list_categories()
+    await show_categories_page(message, session, page=1)
 
-    if not categories:
+
+async def show_categories_page(message: Message, session: AsyncSession, page: int) -> None:
+    repo = await _get_catalog_repo(session)
+    total_count = await repo.count_categories()
+
+    if total_count == 0:
         await message.answer("Категории пока не созданы.")
         return
 
-    kb = build_categories_kb(list(categories))
+    total_pages = max(1, (total_count + CLIENT_CATEGORIES_PAGE_SIZE - 1) // CLIENT_CATEGORIES_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    categories = await repo.list_categories_paginated(page, CLIENT_CATEGORIES_PAGE_SIZE)
+    kb = build_categories_kb(list(categories), page, total_count, CLIENT_CATEGORIES_PAGE_SIZE)
     await message.answer("Выбери категорию:", reply_markup=kb.as_markup())
+
+
+async def show_categories_page_from_callback(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    page: int,
+) -> None:
+    repo = await _get_catalog_repo(session)
+    total_count = await repo.count_categories()
+
+    if total_count == 0:
+        await callback.message.answer("Категории пока не созданы.")
+        await callback.answer()
+        return
+
+    total_pages = max(1, (total_count + CLIENT_CATEGORIES_PAGE_SIZE - 1) // CLIENT_CATEGORIES_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    categories = await repo.list_categories_paginated(page, CLIENT_CATEGORIES_PAGE_SIZE)
+    kb = build_categories_kb(list(categories), page, total_count, CLIENT_CATEGORIES_PAGE_SIZE)
+
+    try:
+        if callback.message.photo:
+            await callback.message.delete()
+            await callback.message.answer("Выбери категорию:", reply_markup=kb.as_markup())
+        else:
+            await callback.message.edit_text("Выбери категорию:", reply_markup=kb.as_markup())
+    finally:
+        await callback.answer()
 
 
 # ---------- Общение с продавцом/владельцем ----------
@@ -405,20 +486,18 @@ async def process_chat_with_seller(message: Message, state: FSMContext, session:
     res = await session.execute(stmt)
     user = res.scalar_one_or_none()
     if user is None:
-        user = User(
+        user, _ = await get_or_create_default_tenant_user(
+            session,
             tg_id=message.from_user.id,
             username=message.from_user.username,
             first_name=message.from_user.first_name,
             last_name=message.from_user.last_name,
-            role=UserRole.CLIENT.value,
+            default_role=UserRole.CLIENT.value,
             ai_quota=settings.ai_client_start_quota,
         )
-        session.add(user)
         await session.commit()
 
-    staff_stmt = select(User.tg_id).where(User.role == UserRole.STAFF.value)
-    staff_res = await session.execute(staff_stmt)
-    staff_ids = [sid for sid in staff_res.scalars().all() if sid]
+    staff_ids = await list_tenant_user_ids_by_role(session, user.tenant_id or 0, UserRole.STAFF.value)
     if not staff_ids:
         await message.answer("⚠️ Сейчас нет продавцов на связи.")
         return
@@ -453,10 +532,12 @@ async def process_chat_with_seller(message: Message, state: FSMContext, session:
             continue
 
     if staff_ids and delivered == 0:
-        await message.bot.send_message(
-            chat_id=settings.owner_id,
-            text="⚠️ Сообщение клиента не доставлено ни одному сотруднику. Проверьте, что они нажали /start и не заблокировали бота.",
-        )
+        owner_tg_id = await get_primary_owner_tg_id(session, user.tenant_id or 0)
+        if owner_tg_id:
+            await message.bot.send_message(
+                chat_id=owner_tg_id,
+                text="⚠️ Сообщение клиента не доставлено ни одному сотруднику. Проверьте, что они нажали /start и не заблокировали бота.",
+            )
 
     await message.answer("✅ Сообщение отправлено продавцу.")
 
@@ -472,15 +553,15 @@ async def process_chat_with_owner(message: Message, state: FSMContext, session: 
     res = await session.execute(stmt)
     user = res.scalar_one_or_none()
     if user is None:
-        user = User(
+        user, _ = await get_or_create_default_tenant_user(
+            session,
             tg_id=message.from_user.id,
             username=message.from_user.username,
             first_name=message.from_user.first_name,
             last_name=message.from_user.last_name,
-            role=UserRole.CLIENT.value,
+            default_role=UserRole.CLIENT.value,
             ai_quota=settings.ai_client_start_quota,
         )
-        session.add(user)
         await session.commit()
 
     username_line = f"@{user.username}" if user.username else "—"
@@ -491,15 +572,21 @@ async def process_chat_with_owner(message: Message, state: FSMContext, session: 
         f"{username_line}"
     )
 
-    kb = _build_support_reply_kb(user.tg_id, can_block=True, is_blocked=bool(user.is_blocked))
+    owner_tg_id = await get_primary_owner_tg_id(session, user.tenant_id or 0)
+    if not owner_tg_id:
+        await message.answer("⚠️ В tenant не назначен владелец.")
+        return
+
+    membership = await get_membership_for_user(session, user, user.tenant_id or 0)
+    kb = _build_support_reply_kb(user.tg_id, can_block=True, is_blocked=bool(membership and membership.is_blocked))
     try:
         await message.bot.forward_message(
-            chat_id=settings.owner_id,
+            chat_id=owner_tg_id,
             from_chat_id=message.chat.id,
             message_id=message.message_id,
         )
         await message.bot.send_message(
-            chat_id=settings.owner_id,
+            chat_id=owner_tg_id,
             text=info_text,
             reply_markup=kb.as_markup(),
         )
@@ -521,15 +608,15 @@ async def process_chat_with_support(message: Message, state: FSMContext, session
     res = await session.execute(stmt)
     user = res.scalar_one_or_none()
     if user is None:
-        user = User(
+        user, _ = await get_or_create_default_tenant_user(
+            session,
             tg_id=message.from_user.id,
             username=message.from_user.username,
             first_name=message.from_user.first_name,
             last_name=message.from_user.last_name,
-            role=UserRole.CLIENT.value,
+            default_role=UserRole.CLIENT.value,
             ai_quota=settings.ai_client_start_quota,
         )
-        session.add(user)
         await session.commit()
 
     username_line = f"@{user.username}" if user.username else "—"
@@ -540,35 +627,39 @@ async def process_chat_with_support(message: Message, state: FSMContext, session
         f"{username_line}"
     )
 
-    staff_stmt = select(User.tg_id).where(User.role == UserRole.STAFF.value)
-    staff_res = await session.execute(staff_stmt)
-    staff_ids = [sid for sid in staff_res.scalars().all() if sid and sid != settings.owner_id]
+    owner_tg_id = await get_primary_owner_tg_id(session, user.tenant_id or 0)
+    staff_ids = [
+        sid
+        for sid in await list_tenant_user_ids_by_role(session, user.tenant_id or 0, UserRole.STAFF.value)
+        if sid and sid != owner_tg_id
+    ]
 
-    kb_owner = _build_support_reply_kb(user.tg_id, can_block=True, is_blocked=bool(user.is_blocked))
+    membership = await get_membership_for_user(session, user, user.tenant_id or 0)
+    kb_owner = _build_support_reply_kb(user.tg_id, can_block=True, is_blocked=bool(membership and membership.is_blocked))
     kb_staff = _build_support_reply_kb(user.tg_id, can_block=False, is_blocked=False)
 
     staff_delivered = 0
-    targets = [settings.owner_id, *staff_ids]
+    targets = [target_id for target_id in [owner_tg_id, *staff_ids] if target_id]
     for target_id in targets:
         try:
             await message.bot.send_message(
                 chat_id=target_id,
                 text=info_text,
-                reply_markup=(kb_owner if target_id == settings.owner_id else kb_staff).as_markup(),
+                reply_markup=(kb_owner if target_id == owner_tg_id else kb_staff).as_markup(),
             )
             await message.bot.copy_message(
                 chat_id=target_id,
                 from_chat_id=message.chat.id,
                 message_id=message.message_id,
             )
-            if target_id != settings.owner_id:
+            if target_id != owner_tg_id:
                 staff_delivered += 1
         except Exception:
             continue
 
-    if staff_ids and staff_delivered == 0:
+    if owner_tg_id and staff_ids and staff_delivered == 0:
         await message.bot.send_message(
-            chat_id=settings.owner_id,
+            chat_id=owner_tg_id,
             text="⚠️ Сообщение клиента не доставлено ни одному сотруднику. Проверьте, что они нажали /start и не заблокировали бота.",
         )
 
@@ -586,16 +677,18 @@ async def show_cart_for(
     user = res.scalar_one_or_none()
 
     if user is None:
-        user = User(
+        user, _ = await get_or_create_default_tenant_user(
+            session,
             tg_id=user_id,
             username=username,
             first_name=first_name,
-            role=UserRole.CLIENT.value,
+            last_name=None,
+            default_role=UserRole.CLIENT.value,
+            ai_quota=0,
         )
-        session.add(user)
         await session.commit()
 
-    orders_repo = OrdersRepo(session)
+    orders_repo = OrdersRepo(session, tenant_id=user.tenant_id)
     items = await orders_repo.list_cart_items(user)
     total = await orders_repo.get_cart_total(user)
 
@@ -615,13 +708,15 @@ async def show_cart_for(
         product_sku = it.product.sku if (it.product and it.product.sku) else None
 
         sku_line = f"   SKU: {product_sku}\n" if product_sku else ""
+        line_total = float(it.price_at_add) * int(it.quantity)
         lines.append(
             f"▫️ <b>{brand_name}</b> | {product_title}\n"
             f"{sku_line}"
-            f"   Размер: {it.size} | {it.quantity} шт. x {it.price_at_add} ₽"
+            f"   Размер: {it.size} | {it.quantity} шт. x {it.price_at_add} ₽ = {line_total:,.0f} ₽"
         )
 
     lines.append(f"\n💰 <b>Итого: {total} ₽</b>")
+    lines.append("\nИзменяйте количество кнопками -1 и +1 под каждой позицией.")
 
     kb = build_cart_kb(list(items))
     await message.answer("\n".join(lines), reply_markup=kb.as_markup(), parse_mode="HTML")
@@ -642,10 +737,16 @@ async def cmd_cart(message: Message, session: AsyncSession) -> None:
 
 @client_router.callback_query(F.data.startswith("cat:"))
 async def cq_category(callback: CallbackQuery, session: AsyncSession) -> None:
-    category_id = int(callback.data.split(":")[1])
+    parts = callback.data.split(":")
+    if len(parts) == 3:
+        source_category_page = int(parts[1])
+        category_id = int(parts[2])
+    else:
+        source_category_page = 1
+        category_id = int(parts[1])
 
-    repo = CatalogRepo(session)
-    cat = await session.get(Category, category_id)
+    repo = await _get_catalog_repo(session)
+    cat = await repo.get_category(category_id)
     if not cat:
         await callback.answer("Категория не найдена")
         return
@@ -668,25 +769,37 @@ async def cq_category(callback: CallbackQuery, session: AsyncSession) -> None:
             await callback.answer()
         return
 
-    await show_brands_page(callback, session, category_id, page=1)
+    await show_brands_page(callback, session, category_id, page=1, source_category_page=source_category_page)
     return
+
+@client_router.callback_query(F.data.startswith("catpage:"))
+async def cq_categories_page(callback: CallbackQuery, session: AsyncSession) -> None:
+    page = int(callback.data.split(":")[1])
+    await show_categories_page_from_callback(callback, session, page)
 
 @client_router.callback_query(F.data.startswith("brandpage:"))
 async def cq_brand_page(callback: CallbackQuery, session: AsyncSession) -> None:
     parts = callback.data.split(":")
-    category_id = int(parts[1])
-    page = int(parts[2])
-    await show_brands_page(callback, session, category_id, page)
+    if len(parts) == 4:
+        source_category_page = int(parts[1])
+        category_id = int(parts[2])
+        page = int(parts[3])
+    else:
+        source_category_page = 1
+        category_id = int(parts[1])
+        page = int(parts[2])
+    await show_brands_page(callback, session, category_id, page, source_category_page=source_category_page)
 
 async def show_brands_page(
     callback: CallbackQuery,
     session: AsyncSession,
     category_id: int,
     page: int,
+    source_category_page: int = 1,
 ) -> None:
     PAGE_SIZE = 8
-    repo = CatalogRepo(session)
-    cat = await session.get(Category, category_id)
+    repo = await _get_catalog_repo(session)
+    cat = await repo.get_category(category_id)
     total_count = await repo.count_brands_by_category(category_id)
 
     if not cat or total_count == 0:
@@ -694,7 +807,7 @@ async def show_brands_page(
         return
 
     brands = await repo.get_brands_by_category_paginated(category_id, page, PAGE_SIZE)
-    kb = build_brands_kb(category_id, list(brands), page, total_count, PAGE_SIZE)
+    kb = build_brands_kb(category_id, list(brands), page, total_count, PAGE_SIZE, source_category_page)
     text = f"📂 Категория: <b>{cat.name}</b>\nВыберите бренд:"
 
     if callback.message.photo:
@@ -727,12 +840,12 @@ async def cq_brand(callback: CallbackQuery, session: AsyncSession) -> None:
 async def show_products_page(callback: CallbackQuery, session: AsyncSession, cat_id: int, brand_id: int, page: int):
     PAGE_SIZE = 5
     
-    repo = CatalogRepo(session)
+    repo = await _get_catalog_repo(session)
     
     products = await repo.get_products_by_category_brand_paginated(cat_id, brand_id, page, PAGE_SIZE)
     total_count = await repo.count_products_by_category_brand(cat_id, brand_id)
     
-    brand = await session.get(Brand, brand_id)
+    brand = await repo.get_brand(brand_id)
     brand_name = brand.name if brand else "Бренд"
 
     if not products and page == 1:
@@ -777,7 +890,7 @@ async def cq_product(callback: CallbackQuery, state: FSMContext, session: AsyncS
         brand_id = int(parts[2])
         product_id = int(parts[3])
 
-        repo = CatalogRepo(session)
+        repo = await _get_catalog_repo(session)
         product = await repo.get_product_with_details(product_id)
     except (IndexError, ValueError) as exc:
         logger.warning("Invalid product callback payload: %s (%s)", callback.data, exc)
@@ -795,7 +908,8 @@ async def cq_product(callback: CallbackQuery, state: FSMContext, session: AsyncS
     stmt = select(User).where(User.tg_id == callback.from_user.id)
     res = await session.execute(stmt)
     user = res.scalar_one_or_none()
-    is_staff = user is not None and (normalize_role(user.role) in (UserRole.STAFF.value, UserRole.OWNER.value) or callback.from_user.id == settings.owner_id)
+    role = await get_runtime_tenant_role_for_tg_id(session, callback.from_user.id)
+    is_staff = role in {UserRole.STAFF.value, UserRole.OWNER.value}
 
     available_sizes = [f"{s.size}" for s in product.stock if s.quantity > 0]
     sizes_str = ", ".join(available_sizes) if available_sizes else "Нет в наличии"
@@ -838,19 +952,28 @@ async def cq_product(callback: CallbackQuery, state: FSMContext, session: AsyncS
 
     if product.photos:
         if len(product.photos) > 1:
-            album = MediaGroupBuilder(caption=text)
-            for ph in product.photos:
-                album.add_photo(media=ph.file_id)
-            
+            from utils.product_media import build_product_media_group
+
+            album = build_product_media_group(product.photos, text)
             await callback.message.answer_media_group(media=album.build())
             await callback.message.answer("👇 Действия:", reply_markup=kb.as_markup())
             
         else:
-            await callback.message.answer_photo(
-                photo=product.photos[0].file_id,
-                caption=text,
-                reply_markup=kb.as_markup()
-            )
+            from utils.product_media import normalize_media_type
+
+            media = product.photos[0]
+            if normalize_media_type(getattr(media, "media_type", None)) == "video":
+                await callback.message.answer_video(
+                    video=media.file_id,
+                    caption=text,
+                    reply_markup=kb.as_markup()
+                )
+            else:
+                await callback.message.answer_photo(
+                    photo=media.file_id,
+                    caption=text,
+                    reply_markup=kb.as_markup()
+                )
     else:
         await callback.message.answer(text, reply_markup=kb.as_markup())
     
@@ -861,14 +984,13 @@ async def cq_product(callback: CallbackQuery, state: FSMContext, session: AsyncS
 
 @client_router.callback_query(F.data == "back:categories")
 async def cq_back_categories(callback: CallbackQuery, session: AsyncSession) -> None:
-    try:
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-        await cmd_catalog(callback.message, session)
-    finally:
-        await callback.answer()
+    await show_categories_page_from_callback(callback, session, page=1)
+
+
+@client_router.callback_query(F.data.startswith("back:categories:"))
+async def cq_back_categories_page(callback: CallbackQuery, session: AsyncSession) -> None:
+    page = int(callback.data.split(":")[2])
+    await show_categories_page_from_callback(callback, session, page=page)
 
 @client_router.callback_query(F.data == "catalog_start")
 async def cq_catalog_start(callback: CallbackQuery, session: AsyncSession) -> None:
@@ -881,12 +1003,8 @@ async def cq_catalog_start(callback: CallbackQuery, session: AsyncSession) -> No
     finally:
         await callback.answer()
 
-@client_router.callback_query(F.data == "ignore")
+@client_router.callback_query(F.data.in_({"ignore", "catalog:noop"}))
 async def cq_ignore(callback: CallbackQuery) -> None:
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
     await callback.answer()
 
 @client_router.callback_query(F.data.startswith("back:brands:"))
@@ -917,31 +1035,115 @@ async def cq_cart_add(callback: CallbackQuery, state: FSMContext) -> None:
 @client_router.message(ClientStates.waiting_for_size)
 async def process_size_input(message: Message, state: FSMContext, session: AsyncSession) -> None:
     size = message.text.strip()
+    if _is_back_text(size):
+        await state.clear()
+        await message.answer("Добавление в корзину отменено.")
+        return
+
     data = await state.get_data()
     product_id = data.get("product_id")
+
+    repo = await _get_catalog_repo(session)
+    product = await repo.get_product_with_details(product_id)
+
+    if not product:
+        await message.answer("Товар не найден. Откройте карточку заново.")
+        await state.clear()
+        return
+
+    available_stock = [stock for stock in product.stock if stock.quantity > 0]
+    match = next((stock for stock in available_stock if stock.size.lower() == size.lower()), None)
+    if not match:
+        sizes_str = ", ".join([stock.size for stock in available_stock]) or "нет"
+        await message.answer(f"Такого размера нет. Доступно: {sizes_str}.")
+        return
+
+    await state.update_data(selected_size=match.size)
+    await state.set_state(ClientStates.waiting_for_quantity)
+    await message.answer(f"📦 Введите количество для размера {match.size} (доступно: {match.quantity}):")
+
+
+@client_router.message(ClientStates.waiting_for_quantity)
+async def process_quantity_input(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    quantity_text = (message.text or "").strip()
+    if _is_back_text(quantity_text):
+        await state.clear()
+        await message.answer("Добавление в корзину отменено.")
+        return
+
+    try:
+        quantity = int(quantity_text)
+        if quantity <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("Введите количество целым числом больше нуля.")
+        return
 
     stmt = select(User).where(User.tg_id == message.from_user.id)
     res = await session.execute(stmt)
     user = res.scalar_one_or_none()
 
-    product = await session.get(Product, product_id)
-
-    if user and product:
-        orders_repo = OrdersRepo(session)
-        await orders_repo.add_to_cart(user, product, size, 1)
-        await session.commit()
-        
-        await message.answer(
-            f"✅ Товар <b>{product.title}</b> (размер {size}) добавлен в корзину!",
-            parse_mode="HTML"
+    if user is None:
+        user, _ = await get_or_create_default_tenant_user(
+            session,
+            tg_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+            default_role=UserRole.CLIENT.value,
+            ai_quota=settings.ai_client_start_quota,
         )
-        
-        kb = InlineKeyboardBuilder()
-        kb.button(text="🛒 Перейти в корзину", callback_data="show:cart")
-        kb.button(text="🛍 Продолжить покупки", callback_data="back:categories")
-        await message.answer("Что дальше?", reply_markup=kb.as_markup())
-    else:
-        await message.answer("Ошибка добавления. Попробуйте снова /catalog")
+        await session.commit()
+
+    data = await state.get_data()
+    product_id = data.get("product_id")
+    size = data.get("selected_size")
+    repo = await _get_catalog_repo(session)
+    product = await repo.get_product_with_details(product_id)
+
+    if not product or not size:
+        await message.answer("Ошибка добавления. Откройте карточку товара заново.")
+        await state.clear()
+        return
+
+    match = next((stock for stock in product.stock if stock.size == size and stock.quantity > 0), None)
+    if not match:
+        await message.answer("Этот размер уже закончился. Проверьте карточку товара ещё раз.")
+        await state.clear()
+        return
+
+    orders_repo = OrdersRepo(session, tenant_id=user.tenant_id)
+    cart_items = await orders_repo.list_cart_items(user)
+    existing_qty = next(
+        (
+            item.quantity
+            for item in cart_items
+            if item.product_id == product.id and item.size.lower() == size.lower()
+        ),
+        0,
+    )
+    if existing_qty + quantity > match.quantity:
+        available_to_add = match.quantity - existing_qty
+        if available_to_add <= 0:
+            await message.answer(f"В корзине уже максимум для размера {size}: {existing_qty} шт.")
+        else:
+            await message.answer(
+                f"Нельзя добавить {quantity} шт. Для размера {size} доступно только {available_to_add} шт с учетом корзины."
+            )
+        return
+
+    await orders_repo.add_to_cart(user, product, size, quantity)
+    await session.commit()
+
+    await message.answer(
+        f"✅ Товар <b>{product.title}</b> (размер {size}, количество {quantity}) добавлен в корзину!",
+        parse_mode="HTML"
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🛒 Перейти в корзину", callback_data="show:cart")
+    kb.button(text="🛍 Продолжить покупки", callback_data="back:categories")
+    await message.answer("Что дальше?", reply_markup=kb.as_markup())
 
     await state.clear()
 
@@ -968,6 +1170,49 @@ async def cq_show_cart_cb(callback: CallbackQuery, session: AsyncSession) -> Non
     finally:
         await callback.answer()
 
+@client_router.callback_query(F.data == "cart:noop")
+async def cq_cart_noop(callback: CallbackQuery) -> None:
+    await callback.answer()
+
+@client_router.callback_query(F.data.startswith("cart:qty:"))
+async def cq_cart_change_qty(callback: CallbackQuery, session: AsyncSession) -> None:
+    _, _, item_id_text, delta_text = callback.data.split(":")
+    item_id = int(item_id_text)
+    delta = int(delta_text)
+
+    stmt = select(User).where(User.tg_id == callback.from_user.id)
+    res = await session.execute(stmt)
+    user = res.scalar_one_or_none()
+    if user is None:
+        await callback.answer("Сначала нажмите /start", show_alert=True)
+        return
+
+    orders_repo = OrdersRepo(session, tenant_id=user.tenant_id)
+    status, item, available_quantity = await orders_repo.change_cart_item_quantity(user, item_id, delta)
+
+    if status == "not_found":
+        await callback.answer("Позиция не найдена", show_alert=True)
+        return
+
+    if status == "min_reached":
+        await callback.answer("Минимум для позиции: 1 шт. Для удаления используйте кнопку удаления.")
+        return
+
+    if status == "stock_limit":
+        if available_quantity is None:
+            await callback.answer("Товар закончился", show_alert=True)
+        else:
+            await callback.answer(f"Больше добавить нельзя: доступно только {available_quantity} шт.")
+        return
+
+    await session.commit()
+    await _show_cart_from_callback(callback, session)
+    updated_quantity = int(item.quantity) if item is not None else None
+    if updated_quantity is None:
+        await callback.answer("Количество обновлено")
+    else:
+        await callback.answer(f"Количество: {updated_quantity} шт.")
+
 @client_router.callback_query(F.data.startswith("cart:del:"))
 async def cq_cart_del(callback: CallbackQuery, session: AsyncSession) -> None:
     item_id = int(callback.data.split(":")[2])
@@ -976,7 +1221,7 @@ async def cq_cart_del(callback: CallbackQuery, session: AsyncSession) -> None:
     res = await session.execute(stmt)
     user = res.scalar_one_or_none()
 
-    orders_repo = OrdersRepo(session)
+    orders_repo = OrdersRepo(session, tenant_id=user.tenant_id if user else None)
     await orders_repo.delete_cart_item(user, item_id)
     await session.commit()
 
@@ -1066,18 +1311,18 @@ async def process_order_phone(message: Message, state: FSMContext, session: Asyn
             f"📦 <b>Состав заказа:</b>\n"
             f"{items_list_text}"
         )
-        await bot.send_message(settings.owner_id, admin_text, parse_mode="HTML")
-        staff_stmt = select(User.tg_id).where(User.role == UserRole.STAFF.value)
-        staff_res = await session.execute(staff_stmt)
-        staff_ids = staff_res.scalars().all()
-        for staff_id in staff_ids:
-            if staff_id in (settings.owner_id, message.from_user.id):
+        owner_tg_id = await get_primary_owner_tg_id(session, user.tenant_id or order.tenant_id or 0)
+        recipients = await list_tenant_recipient_ids(session, user.tenant_id or order.tenant_id or 0)
+        for staff_id in recipients:
+            if staff_id in {owner_tg_id, message.from_user.id}:
                 continue
             try:
                 await bot.send_message(staff_id, admin_text, parse_mode="HTML")
             except Exception as exc:
                 logger.warning("Failed to send order notification to staff %s: %s", staff_id, exc)
                 continue
+        if owner_tg_id:
+            await bot.send_message(owner_tg_id, admin_text, parse_mode="HTML")
     except Exception as exc:
         logger.error("Failed to send order notification to owner: %s", exc)
 

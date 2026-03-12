@@ -1,0 +1,67 @@
+groups:
+  - name: mli-shop-api
+    rules:
+      - alert: MLIWebAPIDown
+        expr: up{job="mli_web_api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: web_api недоступен
+          description: Prometheus не может получить метрики web_api более 2 минут.
+
+      - alert: MLIWebAPIHigh5xxRate
+        expr: |
+          (
+            sum(rate(app_http_requests_total{job="mli_web_api",status=~"5.."}[5m]))
+            /
+            clamp_min(sum(rate(app_http_requests_total{job="mli_web_api"}[5m])), 0.001)
+          ) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Повышенный уровень 5xx на web_api
+          description: Доля 5xx ответов web_api превышает 5% более 10 минут.
+
+      - alert: MLIWebAPISlowP95
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(app_http_request_duration_seconds_bucket{job="mli_web_api"}[5m]))
+          ) > 1.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Высокая latency web_api
+          description: P95 latency web_api превышает 1.5 секунды более 10 минут.
+
+  - name: mli-shop-tenants
+    rules:
+      - alert: MLITenantMissingBotToken
+        expr: app_tenant_status_active == 1 and app_tenant_has_bot_token == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Активный tenant без BOT_TOKEN
+          description: Tenant {{ $labels.tenant_slug }} активен, но не имеет bot token.
+
+      - alert: MLITenantMissingAdminAPIKey
+        expr: app_tenant_status_active == 1 and app_tenant_has_admin_api_key == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Активный tenant без admin API key
+          description: Tenant {{ $labels.tenant_slug }} активен, но не имеет admin API key.
+
+      - alert: MLITenantEmptyCatalog
+        expr: app_tenant_status_active == 1 and app_tenant_products_total == 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: У активного tenant пустой каталог
+          description: Tenant {{ $labels.tenant_slug }} активен, но каталог остаётся пустым более 30 минут.

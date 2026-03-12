@@ -1,7 +1,14 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   db:
     image: postgres:15-alpine
     restart: always
+    logging: *default-logging
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-shop_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-shop_password}
@@ -18,6 +25,7 @@ services:
   redis:
     image: redis:7-alpine
     restart: always
+    logging: *default-logging
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -28,6 +36,7 @@ services:
   rabbitmq:
     image: rabbitmq:3-management-alpine
     restart: always
+    logging: *default-logging
     expose:
       - "5672"
       - "15672"
@@ -44,6 +53,8 @@ services:
   bot:
     build: .
     restart: always
+    stop_grace_period: 30s
+    logging: *default-logging
     depends_on:
       db:
         condition: service_healthy
@@ -62,6 +73,8 @@ services:
   worker:
     build: .
     restart: always
+    stop_grace_period: 30s
+    logging: *default-logging
     depends_on:
       db:
         condition: service_healthy
@@ -80,6 +93,8 @@ services:
   web_api:
     build: .
     restart: always
+    stop_grace_period: 30s
+    logging: *default-logging
     depends_on:
       db:
         condition: service_healthy
@@ -94,28 +109,39 @@ services:
       REDIS_URL: redis://redis:6379/0
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-mli_shop}:${RABBITMQ_PASS:-changeme_rabbitmq}@rabbitmq:5672/
     ports:
-      - "0.0.0.0:8000:8000"
-    command: sh -c "alembic -c /app/alembic.ini upgrade head && python web_api.py"
+      - "0.0.0.0:${WEB_API_PORT:-8010}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    command: sh -c "alembic -c /app/alembic.ini upgrade head && WEB_API_PORT=8000 python web_api.py"
 
   nginx:
     image: nginx:1.27-alpine
     restart: always
+    logging: *default-logging
     depends_on:
       web_api:
-        condition: service_started
+        condition: service_healthy
     ports:
       - "80:80"
       - "443:443"
     environment:
       TLS_DOMAIN: ${TLS_DOMAIN}
+      NGINX_ENVSUBST_TEMPLATE_SUFFIX: .disabled
+    command: ["/bin/sh", "/opt/mli/render-nginx-config.sh"]
     volumes:
       - ./infra/nginx/templates:/etc/nginx/templates:ro
+      - ./infra/nginx/render-nginx-config.sh:/opt/mli/render-nginx-config.sh:ro
       - ./certbot/conf:/etc/letsencrypt
       - ./certbot/www:/var/www/certbot
 
   certbot:
     image: certbot/certbot:latest
     profiles: ["ops"]
+    logging: *default-logging
     volumes:
       - ./certbot/conf:/etc/letsencrypt
       - ./certbot/www:/var/www/certbot

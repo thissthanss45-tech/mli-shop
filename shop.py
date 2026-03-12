@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
 import sys
+import time
 
 from aiogram import Bot, Dispatcher
 from aiogram.types import ErrorEvent
@@ -21,6 +23,17 @@ from models.users import normalize_role
 from middlewares.db import DbSessionMiddleware
 from middlewares.block_user import BlockUserMiddleware
 from middlewares.trace import TraceMiddleware
+from utils.tenants import (
+    ensure_tenant_membership,
+    get_or_create_default_tenant_user,
+    get_or_create_tenant_settings,
+    get_primary_owner_tg_id,
+    get_role_for_user,
+    is_runtime_owner,
+    is_user_blocked_in_tenant,
+    resolve_tenant_by_bot_token,
+    sync_user_role_from_memberships,
+)
 from utils.trace import get_trace_id
 from handlers import (
     client_router,
@@ -62,76 +75,87 @@ logger.add(
     ),
 )
 
+_DB_RESET_CONFIRMATIONS: dict[int, tuple[str, float]] = {}
+_DB_RESET_CONFIRMATION_TTL_SEC = 300
+_DB_RESET_LOCK = asyncio.Lock()
+
 
 async def start_handler(message: Message, session: AsyncSession) -> None:
-    stmt = select(User).where(User.tg_id == message.from_user.id)
-    res = await session.execute(stmt)
-    user = res.scalar_one_or_none()
+    tenant = await resolve_tenant_by_bot_token(session, settings.bot_token)
+    primary_owner_tg_id = await get_primary_owner_tg_id(session, tenant.id)
+    role = UserRole.CLIENT.value
+    if primary_owner_tg_id is None and message.from_user.id == settings.owner_id:
+        role = UserRole.OWNER.value
+    user, membership = await get_or_create_default_tenant_user(
+        session,
+        tg_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        default_role=role,
+        ai_quota=settings.ai_client_start_quota,
+    )
 
-    if user is None:
-        role = (
-            UserRole.OWNER.value
-            if message.from_user.id == settings.owner_id
-            else UserRole.CLIENT.value
-        )
-        user = User(
-            tg_id=message.from_user.id,
-            username=message.from_user.username,
-            role=role,
-            ai_quota=settings.ai_client_start_quota
-        )
-        session.add(user)
-        await session.commit()
-    elif user.is_blocked and message.from_user.id != settings.owner_id:
+    role_value = await get_role_for_user(session, user, tenant.id)
+    if await is_user_blocked_in_tenant(session, message.from_user.id, tenant.id) and normalize_role(role_value) != UserRole.OWNER.value:
         await message.answer("⛔ Вы заблокированы.")
         return
 
+    tenant_settings = await get_or_create_tenant_settings(session, user.tenant_id)
+    await session.commit()
+
+    logger.info(
+        "start_command tenant_slug={} tenant_id={} user_id={} username={} role={} text={!r}",
+        tenant.slug,
+        tenant.id,
+        message.from_user.id,
+        message.from_user.username,
+        normalize_role(role_value),
+        message.text,
+    )
+
+    first_name = message.from_user.first_name or "гость"
+
     # Меню по ролям
-    if normalize_role(user.role) == UserRole.OWNER.value:
+    if normalize_role(role_value) == UserRole.OWNER.value:
+        menu_rows = tenant_settings.menu_owner or [
+            ["📦 Товары", "📊 Склад"],
+            ["📋 Заказы", "📈 Статистика"],
+            ["✨ AI-Консультант", "🔙 Отмена"],
+        ]
         kb = ReplyKeyboardMarkup(
-            keyboard=[
-                [
-                    KeyboardButton(text="📦 Товары"),
-                    KeyboardButton(text="📊 Склад"),
-                ],
-                [
-                    KeyboardButton(text="📋 Заказы"),
-                    KeyboardButton(text="📈 Статистика"),
-                ],
-                [
-                    KeyboardButton(text="✨ AI-Консультант"),
-                    KeyboardButton(text="🔙 Отмена"),
-                ],
-            ],
+            keyboard=[[KeyboardButton(text=str(button_text)) for button_text in row] for row in menu_rows],
             resize_keyboard=True,
         )
-        text = f"👑 Привет, владелец {message.from_user.first_name}!\nВыбери действие:"
+        text = tenant_settings.welcome_text_owner or f"👑 Привет, владелец {first_name}!\nВыбери действие:"
     
-    elif normalize_role(user.role) == UserRole.STAFF.value:
+    elif normalize_role(role_value) == UserRole.STAFF.value:
+        menu_rows = tenant_settings.menu_staff or [
+            ["🛍 Каталог", "📋 Заказы"],
+            ["💳 Касса"],
+        ]
         kb = ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="🛍 Каталог"), KeyboardButton(text="📋 Заказы")],
-                [KeyboardButton(text="💳 Касса")],
-            ],
+            keyboard=[[KeyboardButton(text=str(button_text)) for button_text in row] for row in menu_rows],
             resize_keyboard=True,
         )
-        text = f"👔 Привет, сотрудник {message.from_user.first_name}!\nТвой рабочий терминал готов."
+        text = tenant_settings.welcome_text_staff or f"👔 Привет, сотрудник {first_name}!\nТвой рабочий терминал готов."
     else:
+        menu_rows = tenant_settings.menu_client or [
+            ["🛍 Каталог", "🛒 Корзина"],
+            ["📦 Заказы", "✨ AI-Консультант"],
+            ["💬 Продавец", "💬 Владелец"],
+        ]
         kb = ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="🛍 Каталог"), KeyboardButton(text="🛒 Корзина")],
-                [KeyboardButton(text="📦 Заказы"), KeyboardButton(text="✨ AI-Консультант")],
-                [KeyboardButton(text="💬 Продавец"), KeyboardButton(text="💬 Владелец")],
-            ],
+            keyboard=[[KeyboardButton(text=str(button_text)) for button_text in row] for row in menu_rows],
             resize_keyboard=True,
         )
-        text = f"Привет, {message.from_user.first_name}!\nВыбери действие:"
+        text = tenant_settings.welcome_text_client or f"Привет, {first_name}!\nВыбери действие:"
 
     await message.answer(text, reply_markup=kb)
 
 
 async def set_staff_handler(message: Message, session: AsyncSession) -> None:
-    if message.from_user.id != settings.owner_id:
+    if not await is_runtime_owner(session, message.from_user.id):
         await message.answer("Эта команда доступна только владельцу.")
         return
     parts = message.text.split()
@@ -145,13 +169,24 @@ async def set_staff_handler(message: Message, session: AsyncSession) -> None:
     if user is None:
         await message.answer(f"Пользователь {target_tg_id} не найден.")
         return
-    user.role = UserRole.STAFF.value
+    tenant = await resolve_tenant_by_bot_token(session, settings.bot_token)
+    membership = await ensure_tenant_membership(session, user, tenant.id, UserRole.CLIENT.value)
+    membership.role = UserRole.STAFF.value
+    if user.tenant_id is None:
+        user.tenant_id = tenant.id
+    await sync_user_role_from_memberships(session, user)
     await session.commit()
+    logger.info(
+        "owner_action action=staff tenant_id=%s actor_tg_id=%s target_tg_id=%s",
+        tenant.id,
+        message.from_user.id,
+        target_tg_id,
+    )
     await message.answer(f"✅ Пользователь {target_tg_id} теперь STAFF.")
 
 
 async def unset_staff_handler(message: Message, session: AsyncSession) -> None:
-    if message.from_user.id != settings.owner_id:
+    if not await is_runtime_owner(session, message.from_user.id):
         await message.answer("Эта команда доступна только владельцу.")
         return
     parts = message.text.split()
@@ -165,14 +200,86 @@ async def unset_staff_handler(message: Message, session: AsyncSession) -> None:
     if user is None:
         await message.answer(f"Пользователь {target_tg_id} не найден.")
         return
-    user.role = UserRole.CLIENT.value
+    tenant = await resolve_tenant_by_bot_token(session, settings.bot_token)
+    membership = await ensure_tenant_membership(session, user, tenant.id, UserRole.CLIENT.value)
+    membership.role = UserRole.CLIENT.value
+    if user.tenant_id is None:
+        user.tenant_id = tenant.id
+    await sync_user_role_from_memberships(session, user)
     await session.commit()
+    logger.info(
+        "owner_action action=unstaff tenant_id=%s actor_tg_id=%s target_tg_id=%s",
+        tenant.id,
+        message.from_user.id,
+        target_tg_id,
+    )
     await message.answer(f"✅ Пользователь {target_tg_id} теперь CLIENT.")
+
+
+async def reset_db_handler(message: Message, session: AsyncSession) -> None:
+    if not await is_runtime_owner(session, message.from_user.id):
+        await message.answer("Эта команда доступна только владельцу.")
+        return
+
+    confirmation_code = secrets.token_hex(4).upper()
+    expires_at = time.time() + _DB_RESET_CONFIRMATION_TTL_SEC
+    _DB_RESET_CONFIRMATIONS[message.from_user.id] = (confirmation_code, expires_at)
+
+    await message.answer(
+        "⚠️ Будут удалены все пользователи, товары, заказы, корзины, склад и AI-логи.\n"
+        f"Для подтверждения в течение 5 минут отправь: /confirm_resetdb {confirmation_code}"
+    )
+
+
+async def confirm_reset_db_handler(message: Message, session: AsyncSession) -> None:
+    if not await is_runtime_owner(session, message.from_user.id):
+        await message.answer("Эта команда доступна только владельцу.")
+        return
+
+    parts = message.text.split(maxsplit=1)
+    if len(parts) != 2:
+        await message.answer("Используй: /confirm_resetdb <код>")
+        return
+
+    expected = _DB_RESET_CONFIRMATIONS.get(message.from_user.id)
+    if expected is None:
+        await message.answer("Нет активного запроса на очистку. Сначала вызови /resetdb")
+        return
+
+    code, expires_at = expected
+    if time.time() > expires_at:
+        _DB_RESET_CONFIRMATIONS.pop(message.from_user.id, None)
+        await message.answer("Код подтверждения истек. Сначала вызови /resetdb заново.")
+        return
+
+    if parts[1].strip().upper() != code:
+        await message.answer("Неверный код подтверждения.")
+        return
+
+    from database.maintenance import reset_database_data
+
+    if _DB_RESET_LOCK.locked():
+        await message.answer("Очистка БД уже выполняется. Дождись завершения.")
+        return
+
+    async with _DB_RESET_LOCK:
+        _DB_RESET_CONFIRMATIONS.pop(message.from_user.id, None)
+        await session.rollback()
+        await session.close()
+        truncated_tables = await reset_database_data()
+
+    await message.answer(
+        f"✅ База данных очищена. Обнулено таблиц: {truncated_tables}.\n"
+        "Теперь можно начинать с нуля. Для повторной регистрации владельца используй /start."
+    )
 
 
 async def on_startup() -> None:
     logger.info("Инициализация БД…")
     await init_db()
+    async with async_session_maker() as session:
+        await resolve_tenant_by_bot_token(session, settings.bot_token)
+        await session.commit()
     logger.info("БД готова.")
 
 
@@ -214,6 +321,8 @@ async def main() -> None:
     dp.message.register(start_handler, CommandStart())
     dp.message.register(set_staff_handler, Command("staff"))
     dp.message.register(unset_staff_handler, Command("unstaff"))
+    dp.message.register(reset_db_handler, Command("resetdb"))
+    dp.message.register(confirm_reset_db_handler, Command("confirm_resetdb"))
 
     setup_routers(dp)
     setup_error_handlers(dp)

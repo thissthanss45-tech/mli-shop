@@ -9,11 +9,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from config import settings
-from models import User, UserRole
+from models import User
 from models.orders import Order, OrderItem, OrderStatus
 from models.catalog import Product
-from models.users import normalize_role
+from utils.tenants import is_runtime_owner_or_staff
 from utils.admin_kb import build_active_order_kb
 
 from .owner_states import AdminOrderReplyStates
@@ -33,11 +32,7 @@ def _orders_menu_kb() -> ReplyKeyboardMarkup:
 
 
 async def _is_owner_or_staff(user_id: int, session: AsyncSession) -> bool:
-    if user_id == settings.owner_id:
-        return True
-    stmt = select(User).where(User.tg_id == user_id)
-    user = (await session.execute(stmt)).scalar_one_or_none()
-    return bool(user and normalize_role(user.role) == UserRole.STAFF.value)
+    return await is_runtime_owner_or_staff(session, user_id)
 
 
 async def _render_order_card(message: Message, session: AsyncSession, order_id: int) -> None:
@@ -93,7 +88,13 @@ async def _render_order_card(message: Message, session: AsyncSession, order_id: 
         kb.adjust(2)
         markup = kb.as_markup()
 
-    await message.answer(card_text, reply_markup=markup, parse_mode="HTML")
+    try:
+        await message.answer(card_text, reply_markup=markup, parse_mode="HTML")
+    except TelegramBadRequest as exc:
+        fallback_markup = markup
+        if order.user and order.user.tg_id and "BUTTON_USER_PRIVACY_RESTRICTED" in str(exc):
+            fallback_markup = build_active_order_kb(order.id, order.user.tg_id, sku_items, include_profile_button=False)
+        await message.answer(card_text, reply_markup=fallback_markup, parse_mode="HTML")
 
 
 @admin_orders_router.callback_query(F.data.startswith("admin_reply_"))

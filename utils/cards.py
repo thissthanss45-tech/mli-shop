@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from aiogram import Bot
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.utils.media_group import MediaGroupBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.catalog_repo import CatalogRepo
+from utils.product_media import build_product_media_group, normalize_media_type
 
 
 async def send_product_card(
@@ -56,19 +56,25 @@ async def send_product_card(
 
     if product.photos:
         if len(product.photos) > 1:
-            album = MediaGroupBuilder(caption=text)
-            for ph in product.photos:
-                album.add_photo(media=ph.file_id)
-            
+            album = build_product_media_group(product.photos, text)
             await bot.send_media_group(chat_id=chat_id, media=album.build())
             await bot.send_message(chat_id, "👇 Действия:", reply_markup=kb.as_markup())
         else:
-            await bot.send_photo(
-                chat_id=chat_id,
-                photo=product.photos[0].file_id,
-                caption=text,
-                reply_markup=kb.as_markup()
-            )
+            media = product.photos[0]
+            if normalize_media_type(getattr(media, "media_type", None)) == "video":
+                await bot.send_video(
+                    chat_id=chat_id,
+                    video=media.file_id,
+                    caption=text,
+                    reply_markup=kb.as_markup(),
+                )
+            else:
+                await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=media.file_id,
+                    caption=text,
+                    reply_markup=kb.as_markup()
+                )
     else:
         await bot.send_message(
             chat_id=chat_id,

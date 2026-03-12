@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from config import settings
 from models import User, UserRole
 from models.users import normalize_role
+from utils.tenants import is_runtime_owner, is_runtime_user_blocked
 
 
 class BlockUserMiddleware(BaseMiddleware):
@@ -35,12 +36,11 @@ class BlockUserMiddleware(BaseMiddleware):
         if not from_user:
             return await handler(event, data)
 
-        if from_user.id == settings.owner_id:
-            return await handler(event, data)
-
         if self.session_pool is not None:
             async with self.session_pool() as session_ctx:
-                if await _is_blocked_user(from_user.id, session_ctx):
+                if from_user.id == settings.owner_id or await is_runtime_owner(session_ctx, from_user.id):
+                    return await handler(event, data)
+                if await is_runtime_user_blocked(session_ctx, from_user.id):
                     if isinstance(event, CallbackQuery):
                         await event.answer("⛔ Вы заблокированы.", show_alert=True)
                     else:
@@ -53,7 +53,10 @@ class BlockUserMiddleware(BaseMiddleware):
             res = await session.execute(stmt)
             user = res.scalar_one_or_none()
 
-        if user and user.is_blocked:
+            if from_user.id == settings.owner_id or await is_runtime_owner(session, from_user.id):
+                return await handler(event, data)
+
+        if session is not None and await is_runtime_user_blocked(session, from_user.id):
             if isinstance(event, CallbackQuery):
                 await event.answer("⛔ Вы заблокированы.", show_alert=True)
             else:
